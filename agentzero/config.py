@@ -32,3 +32,13 @@ ANTHROPIC_DIGEST_MODEL: str = os.environ.get("ANTHROPIC_DIGEST_MODEL", "claude-s
 # Digest thresholds
 STALL_DAYS_WORK: int = int(os.environ.get("STALL_DAYS_WORK", "7"))
 STALL_DAYS_PERSONAL: int = int(os.environ.get("STALL_DAYS_PERSONAL", "14"))
+
+# Timezone — used for reminders and digests
+TIMEZONE: str = os.environ.get("TIMEZONE", "Africa/Accra")
+
+# Autonomy — proactive heartbeat
+AUTONOMY_ENABLED: bool = os.environ.get("AUTONOMY_ENABLED", "true").lower() == "true"
+HEARTBEAT_MINUTES: int = int(os.environ.get("HEARTBEAT_MINUTES", "30"))
+QUIET_HOURS_START: int = int(os.environ.get("QUIET_HOURS_START", "21"))  # 21:00
+QUIET_HOURS_END: int = int(os.environ.get("QUIET_HOURS_END", "8"))       # 08:00
+NUDGE_COOLDOWN_HOURS: int = int(os.environ.get("NUDGE_COOLDOWN_HOURS", "4"))

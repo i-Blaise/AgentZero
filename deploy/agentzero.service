@@ -4,11 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=agentzero
-Group=agentzero
-WorkingDirectory=/opt/agentzero
-EnvironmentFile=/opt/agentzero/.env
-ExecStart=/opt/agentzero/venv/bin/uvicorn agentzero.main:app --host 127.0.0.1 --port 8080 --log-level info
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/production/AgentZero
+EnvironmentFile=/var/www/production/AgentZero/.env
+ExecStart=/var/www/production/AgentZero/venv/bin/uvicorn agentzero.main:app --host 127.0.0.1 --port 8080 --log-level info
 Restart=always
 RestartSec=5
 StandardOutput=journal

@@ -3,14 +3,17 @@ LLM abstraction layer.  All provider-specific imports are local to each class;
 nothing outside this file may import openai or anthropic directly.
 
 Protocol:
-  chat(messages, system) -> str                    — for digest narration
-  chat_with_tools(messages, system, tools) -> LLMResponse  — for NL write path
+  chat(messages, system) -> str
+  chat_with_tools(messages, system, tools, image, image_mime) -> LLMResponse
 
-Tool definitions passed in are in the neutral JSON Schema format from tools.py.
+Tool definitions are in neutral JSON Schema format (tools.py).
 Each provider translates to its own wire format internally.
+Image bytes (if provided) are injected into the last user message in the
+provider's multimodal format; history messages remain plain text.
 """
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -33,7 +36,12 @@ class LLMResponse:
 class LLMProvider(Protocol):
     async def chat(self, messages: list[dict], system: str) -> str: ...
     async def chat_with_tools(
-        self, messages: list[dict], system: str, tools: list[dict]
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        image: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> LLMResponse: ...
 
 
@@ -43,7 +51,7 @@ class LLMProvider(Protocol):
 
 class OpenAIProvider:
     def __init__(self, chat_model: str, digest_model: str, api_key: str) -> None:
-        import openai  # local import — keeps openai out of the module-level namespace
+        import openai
         self._client = openai.AsyncOpenAI(api_key=api_key)
         self.chat_model = chat_model
         self.digest_model = digest_model
@@ -61,6 +69,31 @@ class OpenAIProvider:
             for t in tools
         ]
 
+    def _inject_image(
+        self, messages: list[dict], image: bytes, image_mime: str
+    ) -> list[dict]:
+        """Return a copy of messages with the image embedded in the last user turn."""
+        msgs = [m.copy() for m in messages]
+        for i in reversed(range(len(msgs))):
+            if msgs[i]["role"] == "user":
+                b64 = base64.b64encode(image).decode()
+                text = msgs[i]["content"]
+                msgs[i] = {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image_mime};base64,{b64}",
+                                "detail": "auto",
+                            },
+                        },
+                    ],
+                }
+                break
+        return msgs
+
     async def chat(self, messages: list[dict], system: str) -> str:
         resp = await self._client.chat.completions.create(
             model=self.digest_model,
@@ -69,11 +102,17 @@ class OpenAIProvider:
         return resp.choices[0].message.content or ""
 
     async def chat_with_tools(
-        self, messages: list[dict], system: str, tools: list[dict]
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        image: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> LLMResponse:
+        msgs = self._inject_image(messages, image, image_mime) if image else messages
         resp = await self._client.chat.completions.create(
             model=self.chat_model,
-            messages=[{"role": "system", "content": system}] + messages,
+            messages=[{"role": "system", "content": system}] + msgs,
             tools=self._to_openai_tools(tools),
             tool_choice="auto",
         )
@@ -97,7 +136,7 @@ class OpenAIProvider:
 
 class AnthropicProvider:
     def __init__(self, chat_model: str, digest_model: str, api_key: str) -> None:
-        import anthropic  # local import
+        import anthropic
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self.chat_model = chat_model
         self.digest_model = digest_model
@@ -112,6 +151,31 @@ class AnthropicProvider:
             for t in tools
         ]
 
+    def _inject_image(
+        self, messages: list[dict], image: bytes, image_mime: str
+    ) -> list[dict]:
+        msgs = [m.copy() for m in messages]
+        for i in reversed(range(len(msgs))):
+            if msgs[i]["role"] == "user":
+                b64 = base64.b64encode(image).decode()
+                text = msgs[i]["content"]
+                msgs[i] = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image_mime,
+                                "data": b64,
+                            },
+                        },
+                        {"type": "text", "text": text},
+                    ],
+                }
+                break
+        return msgs
+
     async def chat(self, messages: list[dict], system: str) -> str:
         resp = await self._client.messages.create(
             model=self.digest_model,
@@ -125,13 +189,19 @@ class AnthropicProvider:
         return ""
 
     async def chat_with_tools(
-        self, messages: list[dict], system: str, tools: list[dict]
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        image: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> LLMResponse:
+        msgs = self._inject_image(messages, image, image_mime) if image else messages
         resp = await self._client.messages.create(
             model=self.chat_model,
             max_tokens=1024,
             system=system,
-            messages=messages,
+            messages=msgs,
             tools=self._to_anthropic_tools(tools),
         )
         text: str | None = None

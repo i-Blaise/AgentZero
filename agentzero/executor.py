@@ -8,14 +8,31 @@ Fuzzy matching uses difflib SequenceMatcher (threshold 0.4).
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 
+from agentzero.config import TIMEZONE
 from agentzero.db import get_db
 from agentzero.llm import ToolCall
+
+
+def _parse_datetime(s: str) -> datetime | None:
+    """Parse an ISO 8601 (or common) datetime string; returns naive local time."""
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +111,11 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "get_status": _get_status,
         "update_task": _update_task,
         "snooze": _snooze,
+        "set_reminder": _set_reminder,
+        "list_reminders": _list_reminders,
+        "cancel_reminder": _cancel_reminder,
+        "remember": _remember,
+        "forget": _forget,
     }
     handler = handlers.get(tc.name)
     if handler is None:
@@ -113,10 +135,12 @@ async def undo_last(chat_id: int) -> str:
     doc_id = event["document_id"]
 
     if event["prev_state"] is None:
+        # was a create → undo by deleting
         await coll.delete_one({"_id": doc_id})
     else:
-        prev = {k: v for k, v in event["prev_state"].items() if k != "_id"}
-        await coll.update_one({"_id": doc_id}, {"$set": prev})
+        # was an update or delete → restore the full prior document
+        # (replace_one with upsert re-inserts it if it had been deleted)
+        await coll.replace_one({"_id": doc_id}, event["prev_state"], upsert=True)
 
     await db.events.delete_one({"_id": event["_id"]})
     return f'Undid {event["operation"]}.'
@@ -302,3 +326,130 @@ async def _get_status(chat_id: int, args: dict) -> str:
             lines.append(f"{tag} {proj['name']} (no open tasks)")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Reminders
+# ---------------------------------------------------------------------------
+
+async def _set_reminder(chat_id: int, args: dict) -> str:
+    from agentzero.scheduler import schedule_reminder
+
+    text = args["text"].strip()
+    fire_local = _parse_datetime(args["fire_at"])
+    if not fire_local:
+        return f'Could not understand the time "{args["fire_at"]}".'
+
+    tz = ZoneInfo(TIMEZONE)
+    fire_utc = fire_local.replace(tzinfo=tz).astimezone(timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    if fire_utc <= now_utc:
+        return "That time is already in the past — give me a future time."
+
+    db = get_db()
+    result = await db.reminders.insert_one(
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "fire_at": fire_utc,
+            "status": "pending",
+            "created_at": now_utc,
+        }
+    )
+    schedule_reminder(str(result.inserted_id), chat_id, text, fire_utc)
+    await _log_event(chat_id, "set_reminder", "reminders", result.inserted_id, None)
+
+    when = fire_local.strftime("%a %d %b, %H:%M")
+    return f"Got it — I'll remind you to {text} at {when}."
+
+
+async def _list_reminders(chat_id: int, args: dict) -> str:
+    db = get_db()
+    tz = ZoneInfo(TIMEZONE)
+    rows = (
+        await db.reminders.find({"chat_id": chat_id, "status": "pending"})
+        .sort("fire_at", 1)
+        .to_list(None)
+    )
+    if not rows:
+        return "No upcoming reminders."
+    lines = ["Upcoming reminders:"]
+    for r in rows:
+        fire_at = r["fire_at"]
+        if fire_at.tzinfo is None:
+            fire_at = fire_at.replace(tzinfo=timezone.utc)
+        local = fire_at.astimezone(tz)
+        lines.append(f"  • {r['text']} — {local.strftime('%a %d %b, %H:%M')}")
+    return "\n".join(lines)
+
+
+async def _cancel_reminder(chat_id: int, args: dict) -> str:
+    db = get_db()
+    query = args["query"]
+    rows = await db.reminders.find(
+        {"chat_id": chat_id, "status": "pending"}
+    ).to_list(None)
+    if not rows:
+        return "No upcoming reminders to cancel."
+
+    scored = sorted(rows, key=lambda r: _sim(query, r["text"]), reverse=True)
+    best = scored[0]
+    if _sim(query, best["text"]) < 0.3:
+        return f'No reminder matching "{query}".'
+
+    await db.reminders.update_one(
+        {"_id": best["_id"]}, {"$set": {"status": "cancelled"}}
+    )
+    try:
+        from agentzero.scheduler import get_scheduler
+
+        get_scheduler().remove_job(f"reminder:{best['_id']}")
+    except Exception:
+        pass
+    return f'Cancelled reminder: "{best["text"]}".'
+
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+async def _remember(chat_id: int, args: dict) -> str:
+    db = get_db()
+    content = args["content"].strip()
+    category = (args.get("category") or "general").strip()
+
+    # Dedupe near-identical memories
+    existing = await db.memory.find({"chat_id": chat_id}).to_list(None)
+    for m in existing:
+        if _sim(content, m["content"]) > 0.85:
+            return f"Already noted: {m['content']}"
+
+    now = datetime.now(timezone.utc)
+    result = await db.memory.insert_one(
+        {
+            "chat_id": chat_id,
+            "content": content,
+            "category": category,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    await _log_event(chat_id, "remember", "memory", result.inserted_id, None)
+    return f"Noted: {content}"
+
+
+async def _forget(chat_id: int, args: dict) -> str:
+    db = get_db()
+    query = args["query"]
+    rows = await db.memory.find({"chat_id": chat_id}).to_list(None)
+    if not rows:
+        return "I don't have anything remembered yet."
+
+    best = max(rows, key=lambda m: _sim(query, m["content"]))
+    if _sim(query, best["content"]) < 0.3:
+        return f'Nothing remembered matching "{query}".'
+
+    prev_state = dict(best)
+    await db.memory.delete_one({"_id": best["_id"]})
+    await _log_event(chat_id, "forget", "memory", best["_id"], prev_state)
+    return f'Forgot: {best["content"]}'

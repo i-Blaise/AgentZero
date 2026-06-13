@@ -16,6 +16,7 @@ from telegram import Update
 
 from agentzero.config import (
     ALLOWED_CHAT_ID,
+    AUTONOMY_ENABLED,
     TELEGRAM_MODE,
     WEBHOOK_SECRET,
     WEBHOOK_URL,
@@ -25,6 +26,12 @@ from agentzero.db import create_indexes, get_db
 from agentzero.executor import execute_tool, get_status, undo_last
 from agentzero.llm import ToolCall, get_provider
 from agentzero.prompts import build_system_prompt
+from agentzero.scheduler import (
+    load_pending_reminders,
+    schedule_heartbeat,
+    start_scheduler,
+    stop_scheduler,
+)
 from agentzero.telegram_io import get_bot, send
 from agentzero.tools import TOOLS
 
@@ -40,6 +47,12 @@ async def lifespan(app: FastAPI):
     await create_indexes()
     bot = get_bot()
 
+    # Reminders + autonomy heartbeat
+    start_scheduler()
+    await load_pending_reminders()
+    if AUTONOMY_ENABLED:
+        schedule_heartbeat(ALLOWED_CHAT_ID)
+
     if TELEGRAM_MODE == "webhook" and WEBHOOK_URL:
         await bot.set_webhook(
             url=f"{WEBHOOK_URL.rstrip('/')}/webhook",
@@ -53,6 +66,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    stop_scheduler()
     await close_db()
     if TELEGRAM_MODE == "webhook":
         await bot.delete_webhook()
@@ -115,18 +129,39 @@ async def health() -> dict:
 
 async def process_update(update: Update) -> None:
     msg = update.message
-    if not msg or not msg.text:
+    if not msg:
         return
 
     chat_id = msg.chat_id
     if chat_id != ALLOWED_CHAT_ID:
         return  # silently drop unauthorised messages
 
+    # ---- voice message ------------------------------------------------------
+    if msg.voice:
+        await _handle_voice(chat_id, msg)
+        return
+
+    # ---- photo --------------------------------------------------------------
+    if msg.photo:
+        await _handle_photo(chat_id, msg)
+        return
+
+    if not msg.text:
+        return
+
     text = msg.text.strip()
 
     # ---- bot commands -------------------------------------------------------
     if text == "/start":
         await send(chat_id, "AgentZero online. Tell me what to track.")
+        return
+
+    if text.startswith("/checkin"):
+        from agentzero.autonomy import run_heartbeat
+
+        result = await run_heartbeat(chat_id, force=True)
+        if result is None:
+            await send(chat_id, "All clear — nothing needs your attention right now. 🙂")
         return
 
     if text.startswith("/undo"):
@@ -145,15 +180,11 @@ async def process_update(update: Update) -> None:
         return
 
     if text.startswith("/add "):
-        # /add <project> | <task title>
         parts = text[5:].split("|", 1)
         if len(parts) == 2:
             tc = ToolCall(
                 name="add_task",
-                args={
-                    "project_name": parts[0].strip(),
-                    "title": parts[1].strip(),
-                },
+                args={"project_name": parts[0].strip(), "title": parts[1].strip()},
             )
             await send(chat_id, await execute_tool(chat_id, tc))
         else:
@@ -161,7 +192,6 @@ async def process_update(update: Update) -> None:
         return
 
     if text.startswith("/snooze "):
-        # /snooze <task> until <YYYY-MM-DD>
         parts = text[8:].split(" until ", 1)
         if len(parts) == 2:
             tc = ToolCall(
@@ -174,6 +204,65 @@ async def process_update(update: Update) -> None:
         return
 
     # ---- NL path ------------------------------------------------------------
+    await _handle_nl(chat_id, text)
+
+
+async def _handle_photo(chat_id: int, msg) -> None:
+    bot = get_bot()
+    # Telegram gives multiple sizes; largest is always the last in the array
+    photo = msg.photo[-1]
+    try:
+        file = await bot.get_file(photo.file_id)
+        image_bytes = bytes(await file.download_as_bytearray())
+    except Exception:
+        logger.exception("Photo download failed for chat %s", chat_id)
+        await send(chat_id, "Couldn't download that image — try again.")
+        return
+
+    if not image_bytes:
+        await send(chat_id, "Received an empty image — try again.")
+        return
+
+    # Validate JPEG magic bytes (FF D8 FF); Telegram photos are always JPEG
+    if not image_bytes[:3] == b"\xff\xd8\xff":
+        logger.error(
+            "Photo for chat %s is not a valid JPEG (got %s)",
+            chat_id,
+            image_bytes[:4].hex(),
+        )
+        await send(chat_id, "Image format not recognised — try again.")
+        return
+
+    logger.info("Photo received for chat %s: %d bytes", chat_id, len(image_bytes))
+    text = msg.caption.strip() if msg.caption else "Describe what you see in this image and extract any tasks, to-dos, notes, or action items I should track. Don't worry about naming specific brands or products — focus on what I might need to do."
+    await _handle_nl(chat_id, text, image=image_bytes)
+
+
+async def _handle_voice(chat_id: int, msg) -> None:
+    from agentzero.audio import transcribe
+
+    bot = get_bot()
+    try:
+        file = await bot.get_file(msg.voice.file_id)
+        audio = bytes(await file.download_as_bytearray())
+        text = await transcribe(audio)
+    except Exception:
+        logger.exception("Voice transcription failed for chat %s", chat_id)
+        await send(chat_id, "Couldn't transcribe that — try again or type your message.")
+        return
+
+    if not text:
+        await send(chat_id, "Couldn't hear that clearly — try again.")
+        return
+
+    # Echo transcription so the user can see what was heard
+    await send(chat_id, f'🎤 "{text}"')
+    await _handle_nl(chat_id, text)
+
+
+async def _handle_nl(
+    chat_id: int, text: str, image: bytes | None = None, image_mime: str = "image/jpeg"
+) -> None:
     db = get_db()
 
     # Load last 10 messages (oldest first)
@@ -187,16 +276,14 @@ async def process_update(update: Update) -> None:
     history = [{"role": d["role"], "content": d["content"]} for d in history_docs]
     history.append({"role": "user", "content": text})
 
-    # Persist user message before LLM call
     await db.chat_history.insert_one(
         {"chat_id": chat_id, "role": "user", "content": text, "created_at": datetime.utcnow()}
     )
 
     system = await build_system_prompt()
     llm = get_provider()
-    response = await llm.chat_with_tools(history, system, TOOLS)
+    response = await llm.chat_with_tools(history, system, TOOLS, image=image, image_mime=image_mime)
 
-    # Execute all tool calls
     confirmations: list[str] = []
     for tc in response.tool_calls:
         confirmations.append(await execute_tool(chat_id, tc))
@@ -208,7 +295,6 @@ async def process_update(update: Update) -> None:
     else:
         reply = "Done."
 
-    # Persist assistant reply
     await db.chat_history.insert_one(
         {
             "chat_id": chat_id,

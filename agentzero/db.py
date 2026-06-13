@@ -29,6 +29,10 @@ async def create_indexes() -> None:
     await db.events.create_index([("chat_id", 1), ("created_at", -1)])
     await db.chat_history.create_index([("chat_id", 1), ("created_at", -1)])
     await db.disambiguation.create_index([("chat_id", 1)], unique=True)
+    await db.reminders.create_index([("status", 1), ("fire_at", 1)])
+    await db.reminders.create_index([("chat_id", 1), ("status", 1)])
+    await db.memory.create_index([("chat_id", 1)])
+    await db.system_state.create_index([("chat_id", 1)], unique=True)
 
 
 async def close() -> None:
