@@ -1,0 +1,34 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Telegram — support old env var names during migration
+TELEGRAM_BOT_TOKEN: str = (
+    os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN") or ""
+)
+ALLOWED_CHAT_ID: int = int(
+    os.environ.get("ALLOWED_CHAT_ID") or os.environ.get("ALLOWED_USER_ID") or "0"
+)
+TELEGRAM_MODE: str = os.environ.get("TELEGRAM_MODE", "polling")
+WEBHOOK_URL: str = os.environ.get("WEBHOOK_URL", "")
+WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
+
+# MongoDB
+MONGODB_URI: str = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DB: str = os.environ.get("MONGODB_DB", "agentzero")
+
+# LLM
+LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "openai")
+
+OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_CHAT_MODEL: str = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_DIGEST_MODEL: str = os.environ.get("OPENAI_DIGEST_MODEL", "gpt-4o")
+
+ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_CHAT_MODEL: str = os.environ.get("ANTHROPIC_CHAT_MODEL", "claude-haiku-4-5")
+ANTHROPIC_DIGEST_MODEL: str = os.environ.get("ANTHROPIC_DIGEST_MODEL", "claude-sonnet-4-6")
+
+# Digest thresholds
+STALL_DAYS_WORK: int = int(os.environ.get("STALL_DAYS_WORK", "7"))
+STALL_DAYS_PERSONAL: int = int(os.environ.get("STALL_DAYS_PERSONAL", "14"))

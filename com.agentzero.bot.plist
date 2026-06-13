@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agentzero.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/blaisemennia1/Documents/Projects/Personal/AgentZero/venv/bin/python</string>
+        <string>/Users/blaisemennia1/Documents/Projects/Personal/AgentZero/bot.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/blaisemennia1/Documents/Projects/Personal/AgentZero</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/blaisemennia1/Documents/Projects/Personal/AgentZero/logs/agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/blaisemennia1/Documents/Projects/Personal/AgentZero/logs/agent_error.log</string>
+</dict>
+</plist>

@@ -1,0 +1,95 @@
+"""
+MongoDB document schemas (TypedDicts for type-checking; Motor returns plain dicts).
+
+projects:
+  _id          ObjectId
+  name         str
+  scope        "work" | "personal"
+  created_at   datetime
+  updated_at   datetime
+
+tasks:
+  _id            ObjectId
+  project_id     ObjectId  (ref → projects._id)
+  title          str
+  status         "open" | "done" | "snoozed"
+  due_date       datetime | None
+  snoozed_until  datetime | None
+  last_nudged_at datetime | None
+  created_at     datetime
+  updated_at     datetime
+
+events  (undo log):
+  _id          ObjectId
+  chat_id      int
+  operation    str  — create_project | add_task | mark_done | update_task | snooze
+  collection   str  — "projects" | "tasks"
+  document_id  ObjectId
+  prev_state   dict | None  — None for creates (undo = delete); prior doc for updates
+  created_at   datetime
+
+chat_history:
+  _id        ObjectId
+  chat_id    int
+  role       "user" | "assistant"
+  content    str
+  created_at datetime
+
+disambiguation:
+  _id           ObjectId
+  chat_id       int  (unique index)
+  matches       list[dict]  — task docs that matched the query
+  original_tool str
+  original_args dict
+  created_at    datetime
+"""
+
+from typing import TypedDict, Optional, Any
+from datetime import datetime
+
+
+class ProjectDoc(TypedDict, total=False):
+    _id: Any
+    name: str
+    scope: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskDoc(TypedDict, total=False):
+    _id: Any
+    project_id: Any
+    title: str
+    status: str
+    due_date: Optional[datetime]
+    snoozed_until: Optional[datetime]
+    last_nudged_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+
+class EventDoc(TypedDict, total=False):
+    _id: Any
+    chat_id: int
+    operation: str
+    collection: str
+    document_id: Any
+    prev_state: Optional[dict]
+    created_at: datetime
+
+
+class ChatMessageDoc(TypedDict, total=False):
+    _id: Any
+    chat_id: int
+    role: str
+    content: str
+    created_at: datetime
+
+
+class DisambiguationDoc(TypedDict, total=False):
+    _id: Any
+    chat_id: int
+    matches: list
+    original_tool: str
+    original_args: dict
+    created_at: datetime
