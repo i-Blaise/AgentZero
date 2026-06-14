@@ -37,7 +37,7 @@ jobs:
           script: |
             set -e
             cd /var/www/production/AgentZero
-            sudo -u www-data GIT_SSH_COMMAND="ssh -i /var/www/.ssh/id_ed25519 -o IdentitiesOnly=yes" git pull --ff-only origin main
+            sudo -u www-data GIT_SSH_COMMAND="ssh -i /var/www/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/var/www/.ssh/known_hosts -o StrictHostKeyChecking=accept-new" git pull --ff-only origin main
             sudo -u www-data ./venv/bin/pip install -q -r requirements.txt
             sudo systemctl restart agentzero
             sleep 2

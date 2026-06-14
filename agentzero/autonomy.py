@@ -31,6 +31,7 @@ from agentzero.config import (
 )
 from agentzero.db import get_db
 from agentzero.llm import get_provider
+from agentzero.prompts import PERSONALITY
 from agentzero.telegram_io import send
 
 logger = logging.getLogger(__name__)
@@ -155,14 +156,16 @@ async def run_heartbeat(chat_id: int, force: bool = False) -> str | None:
     system = (
         f"You are AgentZero, a proactive personal assistant. Current local time: "
         f"{now_local.strftime('%Y-%m-%d %H:%M')} ({TIMEZONE}).\n\n"
+        f"{PERSONALITY}\n\n"
         "Below is the user's current state. Decide whether anything is genuinely worth "
         "proactively messaging them about RIGHT NOW: an overdue or urgent task, an upcoming "
-        "date you can infer from what you know about them, or a gentle nudge on something "
-        "that's stalled. Be highly selective — a proactive ping that isn't clearly useful is "
-        "worse than staying silent.\n\n"
-        "If something is worth it, write ONE short, warm, specific Telegram message "
-        "(1-3 sentences, no preamble, no sign-off). If nothing is genuinely worth "
-        f"interrupting them for right now, reply with exactly: {SILENT}"
+        "date you can infer from what you know about them, or a nudge on something that's "
+        "stalled. Be highly selective — a proactive ping that isn't clearly useful is worse "
+        "than staying silent.\n\n"
+        "If something is worth it, write ONE short, specific Telegram message in your voice "
+        "(1-3 sentences, no preamble, no sign-off) — dry and witty, but the actionable point "
+        "must be unmistakable. If nothing is genuinely worth interrupting them for right now, "
+        f"reply with exactly: {SILENT}"
     )
 
     try:
