@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from agentzero.config import TIMEZONE
+from agentzero.config import GOOGLE_ACCOUNTS, TIMEZONE
 from agentzero.db import get_db
 
 # Shared voice for everything the bot says (conversational replies + proactive briefs).
@@ -67,6 +67,12 @@ async def build_system_prompt() -> str:
     else:
         mem_lines = "  (nothing remembered yet)"
 
+    google_accounts = (
+        "\n".join(f"  - {a}" for a in GOOGLE_ACCOUNTS)
+        if GOOGLE_ACCOUNTS
+        else "  (none configured)"
+    )
+
     return f"""You are AgentZero, a personal assistant available via Telegram ({TIMEZONE} timezone).
 Current local date & time: {current_time} (today is {today})
 
@@ -86,6 +92,9 @@ Current store (projects + open tasks):
 Upcoming reminders:
 {rem_lines}
 
+Connected Google accounts (use these addresses VERBATIM for any Gmail/Calendar tool — copy them exactly, never alter, abbreviate, or "fix" them, e.g. don't drop an unusual TLD like .com.gh):
+{google_accounts}
+
 Rules:
 - Parse the user's message and call the appropriate tool(s).
 - You may call multiple tools in one turn (e.g. two add_task calls).
@@ -101,6 +110,6 @@ Rules:
 - Scope inference: work-related context → "work"; personal → "personal". If the project already exists, carry its scope — never re-ask.
 - Date/time resolution: interpret relative expressions ("in two minutes", "tomorrow", "next Friday", "end of week") against the current local time above.
 - You can receive images and voice notes. When an image is sent, read and describe what you see, then extract any tasks, to-dos, or action items visible in it.
-- Google (Gmail/Calendar) tools (named like google__*) are READ-ONLY and require a user_google_email argument. The user has more than one Google account — pick the right one from what you know about the user above (work vs personal) based on the request; if it's genuinely ambiguous and matters, ask which account.
+- Google (Gmail/Calendar) tools (named like google__*) are READ-ONLY and require a user_google_email argument. Pass it EXACTLY as listed under "Connected Google accounts" above — copy the address character-for-character; never retype it from memory, never alter a TLD (e.g. .com.gh stays .com.gh). Pick work vs personal based on the request; if genuinely ambiguous, ask. If a Google tool returns an authorization/permission error, FIRST suspect you used a wrong/altered email and retry with the exact address — do NOT immediately tell the user to re-authorize unless the exact address truly fails.
 - When the user wants to actually READ, summarise, or act on the CONTENT of emails (not just a count), don't stop at the search tool — search to find the message id(s), then call the get-message-content tool to fetch the real body, and answer from that. Only reporting counts/snippets when the user wanted the content is a failure.
 - Keep replies concise — this is a chat interface."""

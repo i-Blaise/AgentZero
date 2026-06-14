@@ -56,6 +56,11 @@ REMINDER_FOLLOWUP_MINUTES: int = int(os.environ.get("REMINDER_FOLLOWUP_MINUTES",
 MCP_ENABLED: bool = os.environ.get("MCP_ENABLED", "false").lower() == "true"
 # URL of the Google Workspace MCP server (streamable-http), e.g. http://127.0.0.1:8001/mcp
 GOOGLE_MCP_URL: str = os.environ.get("GOOGLE_MCP_URL", "")
+# Exact connected Google account emails (comma-separated) — injected into the prompt as
+# ground truth so the model uses them verbatim and never guesses/truncates an address.
+GOOGLE_ACCOUNTS: list[str] = [
+    a.strip() for a in os.environ.get("GOOGLE_ACCOUNTS", "").split(",") if a.strip()
+]
 
 # Registry of MCP servers: each {"name": <namespace prefix>, "url": <streamable-http URL>}
 MCP_SERVERS: list[dict] = []
