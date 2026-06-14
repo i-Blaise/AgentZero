@@ -7,6 +7,7 @@ dnspython>=2.6.1          # required for mongodb+srv:// (Atlas) URIs
 apscheduler>=3.10.4
 anthropic>=0.28.0
 openai>=1.30.0
+mcp>=1.2.0                 # MCP client (Gmail/Calendar and other servers)
 python-dotenv==1.0.0
 pydantic>=2.0.0
 

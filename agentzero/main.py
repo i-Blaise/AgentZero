@@ -17,6 +17,7 @@ from telegram import Update
 from agentzero.config import (
     ALLOWED_CHAT_ID,
     AUTONOMY_ENABLED,
+    MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
     WEBHOOK_SECRET,
@@ -26,6 +27,7 @@ from agentzero.db import close as close_db
 from agentzero.db import create_indexes, get_db
 from agentzero.executor import execute_tool, get_status, undo_last
 from agentzero.llm import ToolCall, get_provider
+from agentzero.mcp_client import call_mcp_tool, get_mcp_tools, is_mcp_tool, load_mcp_tools
 from agentzero.prompts import build_system_prompt
 from agentzero.scheduler import (
     load_pending_reminders,
@@ -56,6 +58,8 @@ async def lifespan(app: FastAPI):
         schedule_heartbeat(ALLOWED_CHAT_ID)
     if MORNING_DIGEST_ENABLED:
         schedule_morning_digest(ALLOWED_CHAT_ID)
+    if MCP_ENABLED:
+        await load_mcp_tools()
 
     if TELEGRAM_MODE == "webhook" and WEBHOOK_URL:
         await bot.set_webhook(
@@ -292,18 +296,39 @@ async def _handle_nl(
 
     system = await build_system_prompt()
     llm = get_provider()
-    response = await llm.chat_with_tools(history, system, TOOLS, image=image, image_mime=image_mime)
+    tools = TOOLS + get_mcp_tools()
+    response = await llm.chat_with_tools(history, system, tools, image=image, image_mime=image_mime)
 
-    confirmations: list[str] = []
+    # Execute tool calls — local tools run on the executor, MCP tools route to their server.
+    results: list[tuple[str, str]] = []
+    mcp_used = False
     for tc in response.tool_calls:
-        confirmations.append(await execute_tool(chat_id, tc))
+        if is_mcp_tool(tc.name):
+            mcp_used = True
+            results.append((tc.name, await call_mcp_tool(tc.name, tc.args)))
+        else:
+            results.append((tc.name, await execute_tool(chat_id, tc)))
 
-    if confirmations:
-        reply = "\n".join(confirmations)
-    elif response.content:
-        reply = response.content
+    if not response.tool_calls:
+        reply = response.content or "Done."
+    elif mcp_used:
+        # MCP returns raw data (emails, events) — run it back through the LLM so the
+        # answer is summarised in voice instead of dumping JSON at the user.
+        joined = "\n\n".join(f"[{name}]\n{out}" for name, out in results)
+        narration = (
+            f'The user said: "{text}"\n\n'
+            f"You ran these actions and got these results:\n{joined}\n\n"
+            "Reply to the user in your voice, summarising what actually matters. Be accurate — "
+            "do not invent anything that isn't in the results above."
+        )
+        try:
+            reply = (await llm.chat([{"role": "user", "content": narration}], system)).strip() or joined
+        except Exception:
+            logger.exception("MCP result narration failed — sending raw results")
+            reply = joined
     else:
-        reply = "Done."
+        # Local tools only — the deterministic confirmations are the answer.
+        reply = "\n".join(out for _name, out in results)
 
     await db.chat_history.insert_one(
         {

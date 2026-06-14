@@ -1,0 +1,25 @@
+# Google Workspace MCP server (Gmail + Calendar, read-only) for AgentZero.
+# Place at /etc/systemd/system/workspace-mcp.service
+#
+# Assumes workspace-mcp is installed in a venv at /opt/workspace-mcp/venv and its
+# Google OAuth credentials + settings live in /opt/workspace-mcp/.env. See CONNECT_GOOGLE.md.
+# Verify the exact flags with `workspace-mcp --help` — the project evolves.
+
+[Unit]
+Description=Google Workspace MCP server (read-only)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/workspace-mcp
+EnvironmentFile=/opt/workspace-mcp/.env
+ExecStart=/opt/workspace-mcp/venv/bin/workspace-mcp --transport streamable-http --read-only --tool-tier core
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -43,3 +43,13 @@ NUDGE_COOLDOWN_HOURS: int = int(os.environ.get("NUDGE_COOLDOWN_HOURS", "4"))
 MORNING_DIGEST_ENABLED: bool = os.environ.get("MORNING_DIGEST_ENABLED", "true").lower() == "true"
 MORNING_DIGEST_HOUR: int = int(os.environ.get("MORNING_DIGEST_HOUR", "8"))    # 08:00
 MORNING_DIGEST_MINUTE: int = int(os.environ.get("MORNING_DIGEST_MINUTE", "0"))
+
+# MCP — external platform servers (Gmail, Calendar, …)
+MCP_ENABLED: bool = os.environ.get("MCP_ENABLED", "false").lower() == "true"
+# URL of the Google Workspace MCP server (streamable-http), e.g. http://127.0.0.1:8001/mcp
+GOOGLE_MCP_URL: str = os.environ.get("GOOGLE_MCP_URL", "")
+
+# Registry of MCP servers: each {"name": <namespace prefix>, "url": <streamable-http URL>}
+MCP_SERVERS: list[dict] = []
+if GOOGLE_MCP_URL:
+    MCP_SERVERS.append({"name": "google", "url": GOOGLE_MCP_URL})
