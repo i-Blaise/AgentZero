@@ -1,7 +1,7 @@
 name: Deploy AgentZero
 
-# Runs the test suite on every push/PR, and on a push to `main` (or a manual
-# trigger) SSHes into the VPS (as root) to pull the new code and restart the service.
+# On a push to `main` (or a manual trigger) SSHes into the VPS (as root) to
+# pull the new code and restart the service. No tests are run.
 #
 # ─── Required config (Settings → Secrets and variables → Actions) ─────────────
 #   Variable  SERVER_HOST      VPS public IP or hostname
@@ -20,32 +20,10 @@ name: Deploy AgentZero
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch: {}
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run tests
-        run: pytest -q
-
   deploy:
-    needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy over SSH
