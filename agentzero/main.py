@@ -301,34 +301,33 @@ async def _handle_nl(
 
     # Execute tool calls — local tools run on the executor, MCP tools route to their server.
     results: list[tuple[str, str]] = []
-    mcp_used = False
     for tc in response.tool_calls:
         if is_mcp_tool(tc.name):
-            mcp_used = True
             results.append((tc.name, await call_mcp_tool(tc.name, tc.args)))
         else:
             results.append((tc.name, await execute_tool(chat_id, tc)))
 
     if not response.tool_calls:
         reply = response.content or "Done."
-    elif mcp_used:
-        # MCP returns raw data (emails, events) — run it back through the LLM so the
-        # answer is summarised in voice instead of dumping JSON at the user.
-        joined = "\n\n".join(f"[{name}]\n{out}" for name, out in results)
+    else:
+        # Narrate the outcome in voice. The executor/MCP results are the FACTS;
+        # the LLM turns them into one natural reply instead of a list of robotic
+        # confirmations (and collapses repeated successes/errors into one message).
+        joined = "\n".join(f"- {out}" for _name, out in results)
         narration = (
             f'The user said: "{text}"\n\n'
-            f"You ran these actions and got these results:\n{joined}\n\n"
-            "Reply to the user in your voice, summarising what actually matters. Be accurate — "
-            "do not invent anything that isn't in the results above."
+            f"You acted on it. Here is exactly what happened — these are the facts, "
+            f"don't contradict them or invent anything beyond them:\n{joined}\n\n"
+            "Reply to the user in your voice: natural and conversational, not a list of "
+            "confirmations. If several similar things happened, sum them up together rather "
+            "than enumerating each one. If something failed or is blocked, say so once and "
+            "suggest the fix — don't repeat the same error line. Keep it tight."
         )
         try:
             reply = (await llm.chat([{"role": "user", "content": narration}], system)).strip() or joined
         except Exception:
-            logger.exception("MCP result narration failed — sending raw results")
+            logger.exception("Tool-result narration failed — sending raw results")
             reply = joined
-    else:
-        # Local tools only — the deterministic confirmations are the answer.
-        reply = "\n".join(out for _name, out in results)
 
     await db.chat_history.insert_one(
         {
