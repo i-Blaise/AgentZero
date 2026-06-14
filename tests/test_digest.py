@@ -81,3 +81,29 @@ async def test_digest_falls_back_on_llm_error(mock_db):
     assert "file taxes" in out
     assert "Morning rundown" in out
     mock_send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_evening_digest_includes_tomorrow(mock_db):
+    await _seed_task(mock_db, "submit invoice", days_until_due=1)  # due tomorrow
+    with patch("agentzero.digest.get_provider", return_value=_provider("Wind down. One thing due tomorrow.")), \
+         patch("agentzero.digest.send", new_callable=AsyncMock) as mock_send:
+        out = await digest.send_evening_digest(CHAT_ID)
+    mock_send.assert_called_once()
+    assert out
+    # "due tomorrow" task is surfaced in the gathered data
+    data = await digest._gather(CHAT_ID)
+    assert any("submit invoice" in i for i in data["due_tomorrow"])
+
+
+@pytest.mark.asyncio
+async def test_evening_digest_falls_back_on_llm_error(mock_db):
+    await _seed_task(mock_db, "prep slides", days_until_due=1)
+    prov = MagicMock()
+    prov.chat = AsyncMock(side_effect=RuntimeError("api down"))
+    with patch("agentzero.digest.get_provider", return_value=prov), \
+         patch("agentzero.digest.send", new_callable=AsyncMock) as mock_send:
+        out = await digest.send_evening_digest(CHAT_ID)
+    assert "prep slides" in out
+    assert "Wind-down" in out
+    mock_send.assert_called_once()

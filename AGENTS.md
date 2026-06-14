@@ -89,12 +89,23 @@ format and each LLM provider adapter translates them internally.
 
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
-`get_status`, `set_reminder`, `list_reminders`, `cancel_reminder`, `remember`,
-`forget`. MCP tools are added at runtime, namespaced `google__…` etc.
+`get_status`, `set_reminder`, `list_reminders`, `cancel_reminder`, `complete_reminder`,
+`remember`, `forget`. MCP tools are added at runtime, namespaced `google__…` etc.
+
+**Persistent reminders:** a fired reminder does NOT auto-complete — it goes to
+`status="awaiting_ack"` and a follow-up loop (`scheduler._reminder_followup_job`,
+interval, quiet-hours-aware) keeps re-nudging until the user confirms. `complete_reminder`
+(called when the user says "done/sorted") marks it `done` and stops nudges. Reminder
+statuses: pending → awaiting_ack → done (or cancelled). `REMINDER_FOLLOWUP_MINUTES` config.
+
+**Mission framing:** the system prompt frames the bot as genuinely invested in the user's
+productivity and EARNING — remember goals/clients/deadlines, prioritise by them, and don't
+let commitments silently drop. Completion always requires the user's explicit word.
 
 ### Bot commands (fallbacks / manual triggers)
 `/start` `/status [work|personal]` `/undo` `/done <task>` `/add <project> | <task>`
-`/snooze <task> until <YYYY-MM-DD>` `/checkin` (force heartbeat) `/brief` (force digest).
+`/snooze <task> until <YYYY-MM-DD>` `/checkin` (force heartbeat) `/brief` (force morning
+digest) `/winddown` (force evening digest).
 
 ## Conventions & gotchas (read before editing)
 

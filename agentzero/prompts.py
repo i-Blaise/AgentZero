@@ -44,7 +44,9 @@ async def build_system_prompt() -> str:
     # Upcoming reminders — so "anything scheduled?" is answerable from context
     tz = ZoneInfo(TIMEZONE)
     reminders = (
-        await db.reminders.find({"status": "pending"}).sort("fire_at", 1).to_list(None)
+        await db.reminders.find(
+            {"status": {"$in": ["pending", "awaiting_ack"]}}
+        ).sort("fire_at", 1).to_list(None)
     )
     if reminders:
         rem_lines_list = []
@@ -53,7 +55,8 @@ async def build_system_prompt() -> str:
             if fire_at.tzinfo is None:
                 fire_at = fire_at.replace(tzinfo=timezone.utc)
             local = fire_at.astimezone(tz)
-            rem_lines_list.append(f"  - {r['text']} — {local.strftime('%a %d %b, %H:%M')}")
+            tag = " [AWAITING YOUR CONFIRMATION — not yet done]" if r.get("status") == "awaiting_ack" else ""
+            rem_lines_list.append(f"  - {r['text']} — {local.strftime('%a %d %b, %H:%M')}{tag}")
         rem_lines = "\n".join(rem_lines_list)
     else:
         rem_lines = "  (no upcoming reminders)"
@@ -69,6 +72,11 @@ Current local date & time: {current_time} (today is {today})
 
 {PERSONALITY}
 
+Your mission: you genuinely care about this user's success. Your job is to make them
+productive and help them earn as much as they can. Understand their goals, keep them
+moving toward them, and don't let things they committed to quietly slip. Be the
+assistant that actually follows through.
+
 What you know about the user:
 {mem_lines}
 
@@ -82,7 +90,9 @@ Rules:
 - Parse the user's message and call the appropriate tool(s).
 - You may call multiple tools in one turn (e.g. two add_task calls).
 - Reminders are first-class: when the user says "remind me to X in N minutes / at 3pm / tomorrow", call set_reminder with an absolute fire_at computed from the current time above. Reminders are standalone — never force them into a project.
-- Memory: proactively call remember when the user shares a durable fact about themselves (preferences, people, dates, habits, context) — don't wait to be told. Use what you already know (listed above) to personalise replies; don't re-ask for things you know.
+- Memory: proactively call remember when the user shares a durable fact about themselves (preferences, people, dates, habits, context) — don't wait to be told. ESPECIALLY remember their GOALS, projects that earn them money, deadlines, clients, and what success looks like for them, and use that to prioritise and guide what you surface. Use what you already know (listed above) to personalise replies; don't re-ask for things you know.
+- Completion requires the user's word. A reminder that has fired is marked "AWAITING YOUR CONFIRMATION" above — it is NOT done until the user says so, and it keeps nudging them until then. When the user confirms something is handled ("done", "sorted", "finished that", "I called them"), call complete_reminder (for a reminder) or mark_done (for a task) so it stops following up. Don't assume completion; don't let a commitment quietly drop.
+- Be a partner in their productivity and earning: when it helps, connect what they're doing to their goals, flag when something lucrative or time-sensitive is being neglected, and gently push them to follow through — without being naggy in normal chat.
 - Projects/tasks are for ongoing work the user wants to track. Reminders are for time-based pings. Pick whichever fits; don't ask the user to create a project for a simple reminder.
 - If you're adding one or more tasks to a project that doesn't exist yet, call create_project FIRST in the same turn (infer its scope), then add the tasks. Never make the user create the project manually, and never emit the same "project not found" failure repeatedly.
 - The "Current store" and "Upcoming reminders" above are GROUND TRUTH. When the user asks what they have on (tasks, projects, what's scheduled, what's due), answer from that data. NEVER tell the user they have nothing unless those sections are genuinely empty. If you need fuller detail than the snapshot shows, call get_status or list_reminders rather than guessing.

@@ -114,6 +114,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "set_reminder": _set_reminder,
         "list_reminders": _list_reminders,
         "cancel_reminder": _cancel_reminder,
+        "complete_reminder": _complete_reminder,
         "remember": _remember,
         "forget": _forget,
     }
@@ -367,20 +368,52 @@ async def _list_reminders(chat_id: int, args: dict) -> str:
     db = get_db()
     tz = ZoneInfo(TIMEZONE)
     rows = (
-        await db.reminders.find({"chat_id": chat_id, "status": "pending"})
+        await db.reminders.find(
+            {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
+        )
         .sort("fire_at", 1)
         .to_list(None)
     )
     if not rows:
-        return "No upcoming reminders."
-    lines = ["Upcoming reminders:"]
+        return "No active reminders."
+    lines = ["Reminders:"]
     for r in rows:
         fire_at = r["fire_at"]
         if fire_at.tzinfo is None:
             fire_at = fire_at.replace(tzinfo=timezone.utc)
         local = fire_at.astimezone(tz)
-        lines.append(f"  • {r['text']} — {local.strftime('%a %d %b, %H:%M')}")
+        tag = " — awaiting your confirmation" if r.get("status") == "awaiting_ack" else ""
+        lines.append(f"  • {r['text']} — {local.strftime('%a %d %b, %H:%M')}{tag}")
     return "\n".join(lines)
+
+
+async def _complete_reminder(chat_id: int, args: dict) -> str:
+    """Mark a reminder done once the user confirms it's handled (stops follow-ups)."""
+    db = get_db()
+    query = args["query"]
+    rows = await db.reminders.find(
+        {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
+    ).to_list(None)
+    if not rows:
+        return "No active reminders to close out."
+
+    best = max(rows, key=lambda r: _sim(query, r["text"]))
+    if _sim(query, best["text"]) < 0.3:
+        return f'No active reminder matching "{query}".'
+
+    prev_state = dict(best)
+    await db.reminders.update_one(
+        {"_id": best["_id"]},
+        {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc)}},
+    )
+    await _log_event(chat_id, "complete_reminder", "reminders", best["_id"], prev_state)
+    try:
+        from agentzero.scheduler import get_scheduler
+
+        get_scheduler().remove_job(f"reminder:{best['_id']}")
+    except Exception:
+        pass
+    return f'Nice — marked "{best["text"]}" done. I\'ll stop nagging.'
 
 
 async def _cancel_reminder(chat_id: int, args: dict) -> str:

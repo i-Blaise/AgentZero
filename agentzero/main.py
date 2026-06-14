@@ -17,6 +17,7 @@ from telegram import Update
 from agentzero.config import (
     ALLOWED_CHAT_ID,
     AUTONOMY_ENABLED,
+    EVENING_DIGEST_ENABLED,
     MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
@@ -31,8 +32,10 @@ from agentzero.mcp_client import call_mcp_tool, get_mcp_tools, is_mcp_tool, load
 from agentzero.prompts import build_system_prompt
 from agentzero.scheduler import (
     load_pending_reminders,
+    schedule_evening_digest,
     schedule_heartbeat,
     schedule_morning_digest,
+    schedule_reminder_followups,
     start_scheduler,
     stop_scheduler,
 )
@@ -54,10 +57,13 @@ async def lifespan(app: FastAPI):
     # Reminders + autonomy heartbeat
     start_scheduler()
     await load_pending_reminders()
+    schedule_reminder_followups(ALLOWED_CHAT_ID)
     if AUTONOMY_ENABLED:
         schedule_heartbeat(ALLOWED_CHAT_ID)
     if MORNING_DIGEST_ENABLED:
         schedule_morning_digest(ALLOWED_CHAT_ID)
+    if EVENING_DIGEST_ENABLED:
+        schedule_evening_digest(ALLOWED_CHAT_ID)
     if MCP_ENABLED:
         await load_mcp_tools()
 
@@ -176,6 +182,12 @@ async def process_update(update: Update) -> None:
         from agentzero.digest import send_morning_digest
 
         await send_morning_digest(chat_id)
+        return
+
+    if text.startswith("/winddown"):
+        from agentzero.digest import send_evening_digest
+
+        await send_evening_digest(chat_id)
         return
 
     if text.startswith("/undo"):

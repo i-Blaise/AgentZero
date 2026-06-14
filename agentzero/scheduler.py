@@ -7,7 +7,7 @@ startup, so a restart never drops a pending reminder.  Times are stored in UTC.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -17,9 +17,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 from bson import ObjectId
 
 from agentzero.config import (
+    EVENING_DIGEST_HOUR,
+    EVENING_DIGEST_MINUTE,
     HEARTBEAT_MINUTES,
     MORNING_DIGEST_HOUR,
     MORNING_DIGEST_MINUTE,
+    REMINDER_FOLLOWUP_MINUTES,
     TIMEZONE,
 )
 from agentzero.db import get_db
@@ -78,12 +81,75 @@ async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
     try:
         await send(chat_id, await _phrase_reminder(text))
         db = get_db()
+        now = datetime.now(timezone.utc)
+        # Don't mark done — await the user's confirmation. It moves to awaiting_ack
+        # and the follow-up loop keeps nudging until the user says it's handled.
         await db.reminders.update_one(
             {"_id": ObjectId(reminder_id)},
-            {"$set": {"status": "fired", "fired_at": datetime.now(timezone.utc)}},
+            {
+                "$set": {
+                    "status": "awaiting_ack",
+                    "fired_at": now,
+                    "next_nudge_at": now + timedelta(minutes=REMINDER_FOLLOWUP_MINUTES),
+                    "nudge_count": 0,
+                }
+            },
         )
     except Exception:
         logger.exception("Failed to fire reminder %s", reminder_id)
+
+
+async def _reminder_followup_job(chat_id: int) -> None:
+    """Re-nudge reminders the user fired but hasn't confirmed done. Quiet-hours aware."""
+    from agentzero.autonomy import _in_quiet_hours
+
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    if _in_quiet_hours(now.astimezone(ZoneInfo(TIMEZONE))):
+        return
+
+    due = await db.reminders.find(
+        {"chat_id": chat_id, "status": "awaiting_ack"}
+    ).to_list(None)
+    for r in due:
+        nxt = r.get("next_nudge_at")
+        if nxt and nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        if nxt and nxt > now:
+            continue
+        count = r.get("nudge_count", 0) + 1
+        try:
+            await send(
+                chat_id,
+                await _phrase_reminder(
+                    f"{r['text']} (still not marked done — tell me when it's handled)"
+                ),
+            )
+        except Exception:
+            logger.exception("Follow-up nudge failed for reminder %s", r["_id"])
+            continue
+        await db.reminders.update_one(
+            {"_id": r["_id"]},
+            {
+                "$set": {
+                    "nudge_count": count,
+                    "next_nudge_at": now + timedelta(minutes=REMINDER_FOLLOWUP_MINUTES),
+                }
+            },
+        )
+
+
+def schedule_reminder_followups(chat_id: int) -> None:
+    sched = get_scheduler()
+    sched.add_job(
+        _reminder_followup_job,
+        trigger=IntervalTrigger(minutes=max(15, REMINDER_FOLLOWUP_MINUTES // 3)),
+        args=[chat_id],
+        id="reminder_followups",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    logger.info("Reminder follow-up loop scheduled")
 
 
 def schedule_reminder(
@@ -146,6 +212,32 @@ def schedule_morning_digest(chat_id: int) -> None:
         "Morning digest scheduled daily at %02d:%02d",
         MORNING_DIGEST_HOUR,
         MORNING_DIGEST_MINUTE,
+    )
+
+
+async def _evening_digest_job(chat_id: int) -> None:
+    from agentzero.digest import send_evening_digest
+
+    try:
+        await send_evening_digest(chat_id)
+    except Exception:
+        logger.exception("Evening digest job failed")
+
+
+def schedule_evening_digest(chat_id: int) -> None:
+    sched = get_scheduler()
+    sched.add_job(
+        _evening_digest_job,
+        trigger=CronTrigger(hour=EVENING_DIGEST_HOUR, minute=EVENING_DIGEST_MINUTE),
+        args=[chat_id],
+        id="evening_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "Evening digest scheduled daily at %02d:%02d",
+        EVENING_DIGEST_HOUR,
+        EVENING_DIGEST_MINUTE,
     )
 
 

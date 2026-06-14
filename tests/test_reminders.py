@@ -67,7 +67,7 @@ async def test_list_reminders(mock_db):
 @pytest.mark.asyncio
 async def test_list_reminders_empty(mock_db):
     result = await execute_tool(CHAT_ID, _tc("list_reminders"))
-    assert "no upcoming reminders" in result.lower()
+    assert "no active reminders" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -90,7 +90,9 @@ async def test_fire_reminder_uses_personality(mock_db):
     assert "take a break" in sent.lower()
     assert sent != "⏰ Reminder: take a break"  # it went through the voice
     doc = await mock_db.reminders.find_one({"_id": rid})
-    assert doc["status"] == "fired"
+    # Fired reminders await the user's confirmation, not auto-done
+    assert doc["status"] == "awaiting_ack"
+    assert doc.get("next_nudge_at") is not None
 
 
 @pytest.mark.asyncio
@@ -111,7 +113,61 @@ async def test_fire_reminder_falls_back_on_llm_error(mock_db):
 
     assert mock_send.call_args[0][1] == "⏰ Reminder: call the bank"
     doc = await mock_db.reminders.find_one({"_id": rid})
-    assert doc["status"] == "fired"
+    assert doc["status"] == "awaiting_ack"
+
+
+@pytest.mark.asyncio
+async def test_complete_reminder_stops_followups(mock_db):
+    """Confirming a fired reminder marks it done so follow-ups stop."""
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "submit the proposal", "fire_at": datetime.now(timezone.utc),
+         "status": "awaiting_ack", "created_at": datetime.now(timezone.utc),
+         "next_nudge_at": datetime.now(timezone.utc)}
+    )).inserted_id
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("complete_reminder", query="proposal"))
+    assert "done" in result.lower()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_followup_renudges_unacknowledged(mock_db):
+    """The follow-up loop re-pings a fired-but-unconfirmed reminder when due."""
+    from agentzero import scheduler
+
+    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "email the client", "fire_at": past,
+         "status": "awaiting_ack", "created_at": past, "next_nudge_at": past, "nudge_count": 0}
+    )).inserted_id
+
+    prov = MagicMock()
+    prov.chat = AsyncMock(return_value="⏰ Still need: email the client.")
+    with patch("agentzero.autonomy._in_quiet_hours", return_value=False), \
+         patch("agentzero.llm.get_provider", return_value=prov), \
+         patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._reminder_followup_job(CHAT_ID)
+
+    mock_send.assert_called_once()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["nudge_count"] == 1
+    assert doc["status"] == "awaiting_ack"  # still awaiting until user confirms
+
+
+@pytest.mark.asyncio
+async def test_followup_silent_in_quiet_hours(mock_db):
+    from agentzero import scheduler
+
+    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "x", "fire_at": past, "status": "awaiting_ack",
+         "created_at": past, "next_nudge_at": past, "nudge_count": 0}
+    )
+    with patch("agentzero.autonomy._in_quiet_hours", return_value=True), \
+         patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._reminder_followup_job(CHAT_ID)
+    mock_send.assert_not_called()
 
 
 @pytest.mark.asyncio

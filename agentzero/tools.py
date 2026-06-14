@@ -163,13 +163,32 @@ TOOLS: list[dict] = [
     },
     {
         "name": "cancel_reminder",
-        "description": "Cancel a pending reminder matching a keyword from its text.",
+        "description": "Cancel a pending reminder the user no longer wants (it won't fire). Different from completing one.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
                     "description": "Keyword or phrase to find the reminder (fuzzy matched)",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "complete_reminder",
+        "description": (
+            "Mark a reminder as DONE when the user confirms they've handled it "
+            "(e.g. 'done', 'sorted that', 'I called the bank'). This stops the "
+            "follow-up nudges. Use this — not cancel_reminder — when the thing was "
+            "actually completed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword or phrase identifying which reminder was completed (fuzzy matched)",
                 }
             },
             "required": ["query"],
