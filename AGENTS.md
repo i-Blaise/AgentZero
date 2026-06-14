@@ -16,80 +16,42 @@ in production**.
 
 Capabilities: projects/tasks, ad-hoc reminders, freeform memory, voice notes
 (Whisper transcription), image input (vision), a proactive autonomy heartbeat, a
-daily morning digest, and an MCP client layer for external platforms (Gmail/Calendar
-read-only — server-side setup pending; see CONNECT_GOOGLE.md).
+daily morning digest, and an MCP client layer for external platforms — Gmail +
+Google Calendar read access is LIVE (see "Google … LIVE" section below).
 
-## ▶ NEXT ACTIONS — for an agent operating on the VPS (Gmail/Calendar MCP)
+## Google (Gmail + Calendar) — LIVE (read-only) as of 2026-06-14
 
-This is the current active task: finish connecting Gmail + Google Calendar (read-only)
-via the `workspace-mcp` MCP server. The AgentZero client layer is already built; what's
-left is server-side. Full reference: `CONNECT_GOOGLE.md`. Do the steps in order.
+Gmail + Calendar read access is connected and working in production. How it's wired:
 
-**Hard limit you must respect:** you (the agent) **cannot complete the Google OAuth
-browser consent** — it needs a human to click "approve" in a browser. Do everything up
-to that point, then STOP and hand clear instructions to Blaise. Do not fake it or skip it.
+- **MCP server:** `workspace-mcp` (taylorwilsdon/google_workspace_mcp) installed at
+  `/opt/workspace-mcp` (own venv; separate from the repo). systemd service `workspace-mcp`,
+  runs as `www-data`: `--transport streamable-http --read-only --tool-tier core` on
+  **127.0.0.1:8003** (loopback only). Exposes **24 read-only tools**; write tools (gmail
+  send/modify/draft/trash) are NOT exposed — read-only enforced at the tool layer.
+- **AgentZero wiring:** `/var/www/production/AgentZero/.env` has `MCP_ENABLED=true` and
+  `GOOGLE_MCP_URL=http://127.0.0.1:8003/mcp`. The bot loads the `google__*` tools at startup.
+- **OAuth callback exposure:** Apache vhost `agent-mcp.artfricastudio.com` (TLS via certbot)
+  proxies **ONLY `/oauth2callback`** → 127.0.0.1:8003. **`/mcp` is NOT publicly exposed**
+  (verified 404). NEVER proxy `/mcp` — it has no auth and can read Gmail.
+- **Credential:** `/var/www/.google_workspace_mcp/credentials/menniablaise@gmail.com.json`
+  (refresh_token). NOTE: the token carries BROAD read+write scopes (the only consent flow
+  the server offers requires non-read-only mode); read-only is enforced by the `--read-only`
+  flag, not the token. This was a conscious, owner-approved trade-off.
+- Port note: 8001 is taken by another service (`bitovi-api`) — that's why 8003.
 
-Paths: AgentZero = `/var/www/production/AgentZero`. MCP server = `/opt/workspace-mcp`
-(separate dir; third-party software, not in the repo). Service user = `www-data`.
-
-1. **Confirm the latest code is deployed** (must include `agentzero/mcp_client.py` and
-   `mcp` in requirements):
-   ```
-   sudo -u www-data git -C /var/www/production/AgentZero log --oneline -1
-   /var/www/production/AgentZero/venv/bin/python -c "import mcp; print(mcp.__version__)"
-   ```
-   If `mcp` isn't installed: `sudo -u www-data /var/www/production/AgentZero/venv/bin/pip install -r /var/www/production/AgentZero/requirements.txt`
-
-2. **Install the MCP server:**
-   ```
-   sudo python3 -m venv /opt/workspace-mcp/venv
-   sudo /opt/workspace-mcp/venv/bin/pip install workspace-mcp
-   sudo chown -R www-data:www-data /opt/workspace-mcp
-   ```
-
-3. **Credentials file** `/opt/workspace-mcp/.env` (Blaise provides the Google Client ID/Secret):
-   ```
-   GOOGLE_OAUTH_CLIENT_ID=...
-   GOOGLE_OAUTH_CLIENT_SECRET=...
-   WORKSPACE_MCP_PORT=8001
-   GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8001/oauth2callback
-   OAUTHLIB_INSECURE_TRANSPORT=1
-   ```
-   `sudo chmod 600 /opt/workspace-mcp/.env && sudo chown www-data:www-data /opt/workspace-mcp/.env`
-
-4. **One-time Google consent — HUMAN STEP.** Tell Blaise to open the tunnel from his
-   laptop: `ssh -L 8001:localhost:8001 root@<VPS_IP>`. Then start the server manually so
-   it prints the auth URL:
-   ```
-   sudo -u www-data bash -c 'set -a; . /opt/workspace-mcp/.env; set +a; \
-     /opt/workspace-mcp/venv/bin/workspace-mcp --transport streamable-http --read-only'
-   ```
-   Relay the auth URL to Blaise; he approves in his laptop browser; tokens land in
-   `/var/www/.google_workspace_mcp/credentials/`. Then Ctrl-C the manual run.
-
-5. **Run as a service:**
-   ```
-   sudo cp /var/www/production/AgentZero/deploy/workspace-mcp.service /etc/systemd/system/
-   sudo systemctl daemon-reload && sudo systemctl enable --now workspace-mcp
-   sudo systemctl status workspace-mcp          # active (running)
-   curl -s http://127.0.0.1:8001/mcp            # responds (not connection-refused)
-   ```
-
-6. **Point AgentZero at it** — add to `/var/www/production/AgentZero/.env`:
-   ```
-   MCP_ENABLED=true
-   GOOGLE_MCP_URL=http://127.0.0.1:8001/mcp
-   ```
-   `sudo systemctl restart agentzero` then `sudo journalctl -u agentzero -n 20` —
-   expect `Loaded N MCP tool(s) from google`. If it says `Loaded 0` or errors, the MCP
-   server isn't reachable or isn't authed — recheck steps 4–5.
-
-7. **Verify:** have Blaise message the bot "what's in my inbox?" / "what's on my calendar
-   tomorrow?". Then **update this section** to mark the MCP/Google task done.
-
-Gotchas: the three values `WORKSPACE_MCP_PORT`, `GOOGLE_OAUTH_REDIRECT_URI`, and the
-redirect URI registered in Google Console must match exactly. `workspace-mcp` flags can
-change — verify with `workspace-mcp --help` if one is rejected. Don't commit anything (Blaise does git).
+**Re-auth runbook (if the token is ever revoked/expired):** `--read-only` HIDES the
+`start_google_auth` tool, so consent needs full mode temporarily:
+1. (Safety) set AgentZero `MCP_ENABLED=false`, restart agentzero.
+2. Change the `workspace-mcp` unit ExecStart to `--transport streamable-http --tool-tier complete`
+   (drop `--read-only`; `complete` is required — `full` is invalid), daemon-reload, restart.
+3. Mint a URL: via AgentZero venv python (`mcp` SDK) connect to `http://127.0.0.1:8003/mcp`,
+   call `start_google_auth(service_name="gmail", user_google_email="menniablaise@gmail.com")`.
+   The URL's redirect_uri must be `https://agent-mcp.artfricastudio.com/oauth2callback`.
+4. **HUMAN:** owner opens the URL in any browser, approves. The callback hits the Apache
+   proxy → running server → token written. (Auth code/state TTL is ~10 min; mint fresh if it lapses.)
+5. Restore ExecStart to `--transport streamable-http --read-only --tool-tier core`, daemon-reload,
+   restart. Re-enable AgentZero `MCP_ENABLED=true`, restart agentzero.
+An agent can do everything EXCEPT step 4 (browser approval) — hand that to the owner.
 
 ## Core architecture
 
@@ -186,10 +148,8 @@ uvicorn agentzero.main:app --port 8080
 **Done & live:** projects/tasks, reminders, memory, voice, images, autonomy heartbeat,
 morning digest, MCP client layer (code).
 
-**In progress — Gmail/Calendar via MCP:** client layer is built and tested. The
-server-side setup is pending on Blaise: Google Cloud OAuth + running the
-`workspace-mcp` server. Full walkthrough in `CONNECT_GOOGLE.md`; systemd unit in
-`deploy/workspace-mcp.service`. Once running, set `MCP_ENABLED=true` and `GOOGLE_MCP_URL`.
+**Gmail + Calendar via MCP — DONE & LIVE (2026-06-14):** read-only, working in
+production. See the "Google … LIVE" section above for the full wiring and re-auth runbook.
 
 **Pending from the original spec (not yet built):** disambiguation flow (Phase 2 —
 `disambiguation` collection exists but unused), collectors wiring (Phase 4 — stubs only),
