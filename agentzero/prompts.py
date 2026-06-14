@@ -5,7 +5,7 @@ its own DB access.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from agentzero.config import TIMEZONE
@@ -41,6 +41,23 @@ async def build_system_prompt() -> str:
 
     snapshot = "\n".join(snapshot_lines) if snapshot_lines else "  (no projects yet)"
 
+    # Upcoming reminders — so "anything scheduled?" is answerable from context
+    tz = ZoneInfo(TIMEZONE)
+    reminders = (
+        await db.reminders.find({"status": "pending"}).sort("fire_at", 1).to_list(None)
+    )
+    if reminders:
+        rem_lines_list = []
+        for r in reminders:
+            fire_at = r["fire_at"]
+            if fire_at.tzinfo is None:
+                fire_at = fire_at.replace(tzinfo=timezone.utc)
+            local = fire_at.astimezone(tz)
+            rem_lines_list.append(f"  - {r['text']} — {local.strftime('%a %d %b, %H:%M')}")
+        rem_lines = "\n".join(rem_lines_list)
+    else:
+        rem_lines = "  (no upcoming reminders)"
+
     memories = await db.memory.find({}).sort("created_at", 1).to_list(None)
     if memories:
         mem_lines = "\n".join(f"  - {m['content']}" for m in memories)
@@ -55,8 +72,11 @@ Current local date & time: {current_time} (today is {today})
 What you know about the user:
 {mem_lines}
 
-Current store:
+Current store (projects + open tasks):
 {snapshot}
+
+Upcoming reminders:
+{rem_lines}
 
 Rules:
 - Parse the user's message and call the appropriate tool(s).
@@ -64,7 +84,8 @@ Rules:
 - Reminders are first-class: when the user says "remind me to X in N minutes / at 3pm / tomorrow", call set_reminder with an absolute fire_at computed from the current time above. Reminders are standalone — never force them into a project.
 - Memory: proactively call remember when the user shares a durable fact about themselves (preferences, people, dates, habits, context) — don't wait to be told. Use what you already know (listed above) to personalise replies; don't re-ask for things you know.
 - Projects/tasks are for ongoing work the user wants to track. Reminders are for time-based pings. Pick whichever fits; don't ask the user to create a project for a simple reminder.
-- If the message is not actionable (questions, chitchat), reply conversationally — do not call tools.
+- The "Current store" and "Upcoming reminders" above are GROUND TRUTH. When the user asks what they have on (tasks, projects, what's scheduled, what's due), answer from that data. NEVER tell the user they have nothing unless those sections are genuinely empty. If you need fuller detail than the snapshot shows, call get_status or list_reminders rather than guessing.
+- For pure chitchat with no informational ask (greetings, banter), just reply conversationally — no tools needed.
 - If a required field is genuinely missing and cannot be inferred, ask one focused clarifying question. Prefer sensible defaults over asking.
 - Scope inference: work-related context → "work"; personal → "personal". If the project already exists, carry its scope — never re-ask.
 - Date/time resolution: interpret relative expressions ("in two minutes", "tomorrow", "next Friday", "end of week") against the current local time above.
