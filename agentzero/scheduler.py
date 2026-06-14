@@ -11,11 +11,17 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from bson import ObjectId
 
-from agentzero.config import HEARTBEAT_MINUTES, TIMEZONE
+from agentzero.config import (
+    HEARTBEAT_MINUTES,
+    MORNING_DIGEST_HOUR,
+    MORNING_DIGEST_MINUTE,
+    TIMEZONE,
+)
 from agentzero.db import get_db
 from agentzero.telegram_io import send
 
@@ -115,6 +121,32 @@ def schedule_heartbeat(chat_id: int) -> None:
         misfire_grace_time=120,
     )
     logger.info("Heartbeat scheduled every %d min", HEARTBEAT_MINUTES)
+
+
+async def _morning_digest_job(chat_id: int) -> None:
+    from agentzero.digest import send_morning_digest
+
+    try:
+        await send_morning_digest(chat_id)
+    except Exception:
+        logger.exception("Morning digest job failed")
+
+
+def schedule_morning_digest(chat_id: int) -> None:
+    sched = get_scheduler()
+    sched.add_job(
+        _morning_digest_job,
+        trigger=CronTrigger(hour=MORNING_DIGEST_HOUR, minute=MORNING_DIGEST_MINUTE),
+        args=[chat_id],
+        id="morning_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,  # still fire if we were down up to an hour past 08:00
+    )
+    logger.info(
+        "Morning digest scheduled daily at %02d:%02d",
+        MORNING_DIGEST_HOUR,
+        MORNING_DIGEST_MINUTE,
+    )
 
 
 async def load_pending_reminders() -> None:

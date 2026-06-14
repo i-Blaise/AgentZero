@@ -17,6 +17,7 @@ from telegram import Update
 from agentzero.config import (
     ALLOWED_CHAT_ID,
     AUTONOMY_ENABLED,
+    MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
     WEBHOOK_SECRET,
     WEBHOOK_URL,
@@ -29,6 +30,7 @@ from agentzero.prompts import build_system_prompt
 from agentzero.scheduler import (
     load_pending_reminders,
     schedule_heartbeat,
+    schedule_morning_digest,
     start_scheduler,
     stop_scheduler,
 )
@@ -52,6 +54,8 @@ async def lifespan(app: FastAPI):
     await load_pending_reminders()
     if AUTONOMY_ENABLED:
         schedule_heartbeat(ALLOWED_CHAT_ID)
+    if MORNING_DIGEST_ENABLED:
+        schedule_morning_digest(ALLOWED_CHAT_ID)
 
     if TELEGRAM_MODE == "webhook" and WEBHOOK_URL:
         await bot.set_webhook(
@@ -162,6 +166,12 @@ async def process_update(update: Update) -> None:
         result = await run_heartbeat(chat_id, force=True)
         if result is None:
             await send(chat_id, "All clear — nothing needs your attention right now. 🙂")
+        return
+
+    if text.startswith("/brief"):
+        from agentzero.digest import send_morning_digest
+
+        await send_morning_digest(chat_id)
         return
 
     if text.startswith("/undo"):

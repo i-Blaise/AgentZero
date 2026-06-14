@@ -38,3 +38,8 @@ HEARTBEAT_MINUTES: int = int(os.environ.get("HEARTBEAT_MINUTES", "30"))
 QUIET_HOURS_START: int = int(os.environ.get("QUIET_HOURS_START", "21"))  # 21:00
 QUIET_HOURS_END: int = int(os.environ.get("QUIET_HOURS_END", "8"))       # 08:00
 NUDGE_COOLDOWN_HOURS: int = int(os.environ.get("NUDGE_COOLDOWN_HOURS", "4"))
+
+# Morning digest — daily rundown
+MORNING_DIGEST_ENABLED: bool = os.environ.get("MORNING_DIGEST_ENABLED", "true").lower() == "true"
+MORNING_DIGEST_HOUR: int = int(os.environ.get("MORNING_DIGEST_HOUR", "8"))    # 08:00
+MORNING_DIGEST_MINUTE: int = int(os.environ.get("MORNING_DIGEST_MINUTE", "0"))
