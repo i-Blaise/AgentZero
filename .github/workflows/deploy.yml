@@ -1,26 +1,21 @@
 name: Deploy AgentZero
 
 # Runs the test suite on every push/PR, and on a push to `main` (or a manual
-# trigger) SSHes into the VPS to pull the new code and restart the service.
+# trigger) SSHes into the VPS (as root) to pull the new code and restart the service.
 #
-# ─── Required repository secrets (Settings → Secrets and variables → Actions) ──
-#   SSH_HOST   VPS public IP or hostname
-#   SSH_USER   the login user that runs the deploy (must have the sudo rights below)
-#   SSH_KEY    that user's PRIVATE SSH key (the matching public key is in the
-#              user's ~/.ssh/authorized_keys on the VPS)
-#   SSH_PORT   (optional) SSH port; defaults to 22
+# ─── Required config (Settings → Secrets and variables → Actions) ─────────────
+#   Variable  SERVER_HOST      VPS public IP or hostname
+#   Secret    SERVER_SSH_KEY   the root user's PRIVATE SSH key (its matching
+#                              public key is in /root/.ssh/authorized_keys on the VPS)
 #
 # ─── One-time setup on the VPS ────────────────────────────────────────────────
-#   1. The code lives at /var/www/production/AgentZero, owned by www-data, and
-#      was cloned with a GitHub deploy key so `git pull` works non-interactively:
-#        sudo -u www-data git -C /var/www/production/AgentZero remote -v   # should list origin
-#   2. SSH_USER can run these specific commands without a password prompt.
-#      Add via `sudo visudo -f /etc/sudoers.d/agentzero-deploy`:
-#        <SSH_USER> ALL=(www-data) NOPASSWD: /usr/bin/git, /var/www/production/AgentZero/venv/bin/pip
-#        <SSH_USER> ALL=(root)     NOPASSWD: /usr/bin/systemctl restart agentzero
+#   The code lives at /var/www/production/AgentZero, owned by www-data, and was
+#   cloned with a GitHub deploy key so `git pull` works non-interactively:
+#       sudo -u www-data git -C /var/www/production/AgentZero remote -v   # should list origin
 #
-# If your repo is public, www-data needs no deploy key. If you deploy as a
-# different user/path, adjust the secrets and the script below.
+#   The deploy runs as root, so no sudoers config is needed — root runs the
+#   `sudo -u www-data` (git/pip as the owner) and `systemctl restart` lines
+#   directly. If your repo is public, www-data needs no deploy key.
 
 on:
   push:
@@ -56,7 +51,7 @@ jobs:
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: ${{ vars.SERVER_HOST }}
           username: root
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
