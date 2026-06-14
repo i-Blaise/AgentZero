@@ -5,9 +5,10 @@ The scheduler's add_job is patched out so no real APScheduler runs during tests;
 we only verify the DB state and confirmation strings.
 """
 import pytest
-from datetime import datetime, timedelta
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
+from bson import ObjectId
 
 from agentzero.config import TIMEZONE
 from agentzero.executor import execute_tool
@@ -67,6 +68,50 @@ async def test_list_reminders(mock_db):
 async def test_list_reminders_empty(mock_db):
     result = await execute_tool(CHAT_ID, _tc("list_reminders"))
     assert "no upcoming reminders" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_fire_reminder_uses_personality(mock_db):
+    """Firing renders the text through the LLM and marks the reminder fired."""
+    from agentzero import scheduler
+
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "take a break", "fire_at": datetime.now(timezone.utc),
+         "status": "pending", "created_at": datetime.now(timezone.utc)}
+    )).inserted_id
+
+    prov = MagicMock()
+    prov.chat = AsyncMock(return_value="⏰ Your spine called — take a break.")
+    with patch("agentzero.llm.get_provider", return_value=prov), \
+         patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._fire_reminder(str(rid), CHAT_ID, "take a break")
+
+    sent = mock_send.call_args[0][1]
+    assert "take a break" in sent.lower()
+    assert sent != "⏰ Reminder: take a break"  # it went through the voice
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "fired"
+
+
+@pytest.mark.asyncio
+async def test_fire_reminder_falls_back_on_llm_error(mock_db):
+    """If the LLM call fails, the plain reminder still goes out."""
+    from agentzero import scheduler
+
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "call the bank", "fire_at": datetime.now(timezone.utc),
+         "status": "pending", "created_at": datetime.now(timezone.utc)}
+    )).inserted_id
+
+    prov = MagicMock()
+    prov.chat = AsyncMock(side_effect=RuntimeError("api down"))
+    with patch("agentzero.llm.get_provider", return_value=prov), \
+         patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._fire_reminder(str(rid), CHAT_ID, "call the bank")
+
+    assert mock_send.call_args[0][1] == "⏰ Reminder: call the bank"
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "fired"
 
 
 @pytest.mark.asyncio

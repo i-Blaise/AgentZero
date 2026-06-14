@@ -45,9 +45,32 @@ def stop_scheduler() -> None:
         _scheduler = None
 
 
+async def _phrase_reminder(text: str) -> str:
+    """Render the reminder in AgentZero's voice, falling back to plain text."""
+    from agentzero.llm import get_provider
+    from agentzero.prompts import PERSONALITY
+
+    system = (
+        f"{PERSONALITY}\n\n"
+        "Deliver the reminder below to the user as a single-line Telegram message in your "
+        "voice — dry and a little sharp is good. The thing they need to remember must stay "
+        "crystal clear. Start with the ⏰ emoji. No preamble, no sign-off, one line."
+    )
+    try:
+        msg = (
+            await get_provider().chat(
+                [{"role": "user", "content": f"Reminder to deliver: {text}"}], system
+            )
+        ).strip()
+        return msg or f"⏰ Reminder: {text}"
+    except Exception:
+        logger.exception("Reminder phrasing failed — falling back to plain text")
+        return f"⏰ Reminder: {text}"
+
+
 async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
     try:
-        await send(chat_id, f"⏰ Reminder: {text}")
+        await send(chat_id, await _phrase_reminder(text))
         db = get_db()
         await db.reminders.update_one(
             {"_id": ObjectId(reminder_id)},
