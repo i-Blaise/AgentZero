@@ -3,13 +3,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Telegram — support old env var names during migration
-TELEGRAM_BOT_TOKEN: str = (
-    os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN") or ""
-)
-ALLOWED_CHAT_ID: int = int(
-    os.environ.get("ALLOWED_CHAT_ID") or os.environ.get("ALLOWED_USER_ID") or "0"
-)
+# Telegram
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ALLOWED_CHAT_ID: int = int(os.environ.get("ALLOWED_CHAT_ID") or "0")
 TELEGRAM_MODE: str = os.environ.get("TELEGRAM_MODE", "polling")
 WEBHOOK_URL: str = os.environ.get("WEBHOOK_URL", "")
 WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
