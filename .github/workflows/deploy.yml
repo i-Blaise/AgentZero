@@ -1,4 +1,4 @@
-name: Deploy AgentZero!
+name: Deploy AgentZero
 
 # On a push to `main` (or a manual trigger) SSHes into the VPS (as root) to
 # pull the new code and restart the service. No tests are run.
