@@ -113,6 +113,34 @@ async def test_force_bypasses_cooldown(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_nudges_one_task_and_suppresses_only_it(mock_db):
+    """With several urgent tasks, the heartbeat pings about one and suppresses ONLY that
+    one — leaving the rest free for later heartbeats (the trickle behaviour)."""
+    proj = await mock_db.projects.insert_one(
+        {"name": "Work", "scope": "work", "created_at": datetime.utcnow(), "updated_at": datetime.utcnow()}
+    )
+    for i, title in enumerate(("file the report", "call the client", "send invoice")):
+        await mock_db.tasks.insert_one(
+            {"project_id": proj.inserted_id, "title": title, "status": "open",
+             "due_date": datetime.utcnow() - timedelta(days=3 + i), "snoozed_until": None,
+             "last_nudged_at": None, "created_at": datetime.utcnow() - timedelta(days=10),
+             "updated_at": datetime.utcnow()}
+        )
+
+    # The message clearly references "file the report".
+    with patch("agentzero.autonomy.get_provider",
+               return_value=_mock_provider("That report you were meant to file is now properly overdue.")), \
+         patch("agentzero.autonomy.send", new_callable=AsyncMock) as mock_send:
+        result = await autonomy.run_heartbeat(CHAT_ID, force=True)
+
+    assert result is not None
+    mock_send.assert_called_once()
+    nudged = [t async for t in mock_db.tasks.find({"last_nudged_at": {"$ne": None}})]
+    assert len(nudged) == 1
+    assert nudged[0]["title"] == "file the report"
+
+
+@pytest.mark.asyncio
 async def test_recently_nudged_task_excluded(mock_db):
     """A task nudged < 24h ago should not appear as a candidate."""
     proj = await mock_db.projects.insert_one(

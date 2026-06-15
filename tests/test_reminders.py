@@ -176,29 +176,32 @@ async def test_followup_silent_in_quiet_hours(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_followup_consolidates_backlog_into_one_message(mock_db):
-    """Several due reminders produce ONE message, not a 5-8 message dump."""
+async def test_followup_sends_one_at_a_time(mock_db):
+    """A backlog trickles out: one nudge per wake, not a 5-8 message dump."""
     from agentzero import scheduler
 
-    past = datetime.now(timezone.utc) - timedelta(minutes=5)
-    for text in ("email client", "call bank", "submit invoice", "book flight"):
+    now = datetime.now(timezone.utc)
+    # Different next_nudge_at so "most overdue" is deterministic.
+    for i, text in enumerate(("email client", "call bank", "submit invoice", "book flight")):
         await mock_db.reminders.insert_one(
-            {"chat_id": CHAT_ID, "text": text, "fire_at": past, "status": "awaiting_ack",
-             "created_at": past, "next_nudge_at": past, "nudge_count": 0}
+            {"chat_id": CHAT_ID, "text": text, "fire_at": now,
+             "status": "awaiting_ack", "created_at": now,
+             "next_nudge_at": now - timedelta(minutes=10 + i), "nudge_count": 0}
         )
 
     prov = MagicMock()
-    prov.chat = AsyncMock(return_value="⏰ Still open: email client; call bank; submit invoice; book flight.")
+    prov.chat = AsyncMock(return_value="⏰ book flight — still hanging.")
     with patch("agentzero.autonomy._in_quiet_hours", return_value=False), \
          patch("agentzero.llm.get_provider", return_value=prov), \
          patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
         await scheduler._reminder_followup_job(CHAT_ID)
 
-    mock_send.assert_called_once()  # the whole point: one message, not four
-    # every due reminder advanced its nudge counter and next time
-    async for doc in mock_db.reminders.find({"chat_id": CHAT_ID}):
-        assert doc["nudge_count"] == 1
-        assert _utc(doc["next_nudge_at"]) > past
+    mock_send.assert_called_once()  # exactly one this cycle
+    # Exactly one reminder advanced; the other three are untouched and still due.
+    advanced = [d async for d in mock_db.reminders.find({"chat_id": CHAT_ID, "nudge_count": 1})]
+    assert len(advanced) == 1
+    # The most-overdue one (book flight, oldest next_nudge_at) is the one that fired.
+    assert advanced[0]["text"] == "book flight"
 
 
 @pytest.mark.asyncio

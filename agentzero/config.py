@@ -34,10 +34,14 @@ TIMEZONE: str = os.environ.get("TIMEZONE", "Africa/Accra")
 
 # Autonomy — proactive heartbeat
 AUTONOMY_ENABLED: bool = os.environ.get("AUTONOMY_ENABLED", "true").lower() == "true"
-HEARTBEAT_MINUTES: int = int(os.environ.get("HEARTBEAT_MINUTES", "30"))
+HEARTBEAT_MINUTES: int = int(os.environ.get("HEARTBEAT_MINUTES", "15"))
 QUIET_HOURS_START: int = int(os.environ.get("QUIET_HOURS_START", "21"))  # 21:00
 QUIET_HOURS_END: int = int(os.environ.get("QUIET_HOURS_END", "8"))       # 08:00
-NUDGE_COOLDOWN_HOURS: int = int(os.environ.get("NUDGE_COOLDOWN_HOURS", "4"))
+# Proactive nudges fire ONE item at a time, spaced by a random gap in this range so they
+# feel spontaneous rather than landing on a fixed schedule (e.g. one now, another in ~40 min,
+# another in ~2 h). Set both to the same value for a fixed cadence.
+NUDGE_MIN_GAP_MINUTES: int = int(os.environ.get("NUDGE_MIN_GAP_MINUTES", "30"))
+NUDGE_MAX_GAP_MINUTES: int = int(os.environ.get("NUDGE_MAX_GAP_MINUTES", "150"))
 
 # Morning digest — daily rundown
 MORNING_DIGEST_ENABLED: bool = os.environ.get("MORNING_DIGEST_ENABLED", "true").lower() == "true"

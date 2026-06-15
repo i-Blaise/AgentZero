@@ -99,34 +99,6 @@ async def _phrase_reminder(text: str) -> str:
         return f"⏰ Reminder: {text}"
 
 
-async def _phrase_reminder_batch(texts: list[str]) -> str:
-    """Render a SINGLE nudge covering several unfinished reminders, in voice."""
-    from agentzero.llm import get_provider
-    from agentzero.prompts import PERSONALITY
-
-    plain = "⏰ Still open — tell me when any of these are handled:\n" + "\n".join(
-        f"• {t}" for t in texts
-    )
-    system = (
-        f"{PERSONALITY}\n\n"
-        "The user has several reminders they still haven't confirmed done. Deliver ONE "
-        "short Telegram message that nudges them about ALL of them together — start with the "
-        "⏰ emoji, list each item on its own line so none get lost, dry tone is fine. Make it "
-        "clear they should tell you when each is handled. One message, no preamble or sign-off."
-    )
-    try:
-        msg = (
-            await get_provider().chat(
-                [{"role": "user", "content": "Unfinished reminders:\n" + "\n".join(texts)}],
-                system,
-            )
-        ).strip()
-        return msg or plain
-    except Exception:
-        logger.exception("Batch reminder phrasing failed — falling back to plain text")
-        return plain
-
-
 async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
     try:
         await send(chat_id, await _phrase_reminder(text))
@@ -151,8 +123,9 @@ async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
 
 
 async def _reminder_followup_job(chat_id: int) -> None:
-    """Re-nudge reminders the user fired but hasn't confirmed done — in ONE consolidated
-    message so a backlog never dumps 5-8 separate pings at once. Quiet-hours aware."""
+    """Re-nudge unconfirmed reminders ONE AT A TIME — at most one per wake, the most
+    overdue first. A backlog trickles out across cycles instead of dumping at once.
+    Quiet-hours aware."""
     from agentzero.autonomy import _in_quiet_hours
 
     db = get_db()
@@ -171,34 +144,34 @@ async def _reminder_followup_job(chat_id: int) -> None:
             nxt = nxt.replace(tzinfo=timezone.utc)
         if nxt and nxt > now:
             continue
-        due.append(r)
+        due.append((r, nxt or now))
     if not due:
         return
 
+    # Send only the single most-overdue one this cycle; the rest wait for later wakes.
+    due.sort(key=lambda x: x[1])
+    r = due[0][0]
     try:
-        if len(due) == 1:
-            message = await _phrase_reminder(
-                f"{due[0]['text']} (still not marked done — tell me when it's handled)"
-            )
-        else:
-            message = await _phrase_reminder_batch([r["text"] for r in due])
-        await send(chat_id, message)
+        await send(
+            chat_id,
+            await _phrase_reminder(
+                f"{r['text']} (still not marked done — tell me when it's handled)"
+            ),
+        )
     except Exception:
-        logger.exception("Follow-up nudge failed for chat %s", chat_id)
+        logger.exception("Follow-up nudge failed for reminder %s", r["_id"])
         return
 
     gap = await _followup_minutes(chat_id)
-    next_at = now + timedelta(minutes=gap)
-    for r in due:
-        await db.reminders.update_one(
-            {"_id": r["_id"]},
-            {
-                "$set": {
-                    "nudge_count": r.get("nudge_count", 0) + 1,
-                    "next_nudge_at": next_at,
-                }
-            },
-        )
+    await db.reminders.update_one(
+        {"_id": r["_id"]},
+        {
+            "$set": {
+                "nudge_count": r.get("nudge_count", 0) + 1,
+                "next_nudge_at": now + timedelta(minutes=gap),
+            }
+        },
+    )
 
 
 def schedule_reminder_followups(chat_id: int) -> None:

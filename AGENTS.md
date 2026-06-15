@@ -83,7 +83,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `executor.py` | Deterministic tool execution, fuzzy matching, events log, `undo_last` |
 | `prompts.py` | `build_system_prompt()` (injects date/time, store snapshot, reminders, memory) + `PERSONALITY` constant |
 | `scheduler.py` | APScheduler: one-off reminders, heartbeat interval, morning-digest cron |
-| `autonomy.py` | Proactive heartbeat — gathers candidates, LLM decides send-or-SILENT |
+| `autonomy.py` | Proactive heartbeat — ranks open tasks by urgency, LLM picks ONE to nudge (or SILENT); suppresses only that task; spontaneous jittered spacing |
 | `digest.py` | Morning digest — daily rundown, always sends |
 | `mcp_client.py` | Generic MCP client — connect, namespace (`server__tool`), route calls |
 | `web.py` | Web search (Tavily/Brave/DuckDuckGo) + page fetch (httpx, dependency-free HTML→text). No DB writes. |
@@ -124,15 +124,25 @@ search API (Tavily/Brave/SerpAPI) is the planned breadth upgrade.
 quiet-hours-aware) keeps re-nudging until the user confirms. `complete_reminder`
 (called when the user says "done/sorted") marks it `done` and stops nudges. Reminder
 statuses: pending → awaiting_ack → done (or cancelled).
-- **No more dumps:** the follow-up loop wakes every `_FOLLOWUP_WAKE_MINUTES` (15) but sends
-  ONE consolidated message covering all due reminders (`_phrase_reminder_batch`) — a backlog
-  never fires 5-8 separate pings. Per-reminder `next_nudge_at` gates whether each one is due.
+- **One at a time, never a clump:** the follow-up loop wakes every `_FOLLOWUP_WAKE_MINUTES`
+  (15) and nudges about the SINGLE most-overdue unconfirmed reminder per wake; a backlog
+  trickles out across cycles instead of dumping 5-8 pings at once. Per-reminder `next_nudge_at`
+  gates when each is next due.
 - **Cadence is user-adjustable:** "space them apart / stop nagging so often" → `set_reminder_cadence`
   stores `nudge_interval_minutes` per chat in `system_state` (clamped 30–1440 by
   `clamp_followup_minutes`); `_followup_minutes(chat_id)` reads it, falling back to
   `REMINDER_FOLLOWUP_MINUTES`. Both `_fire_reminder` and the follow-up loop use it.
 - **"Remind me later" → `snooze_reminder`:** pushes `next_nudge_at` (awaiting_ack) or re-schedules
   `fire_at` (pending) by N minutes (default 60); omit `query` to push all outstanding.
+
+**Proactive nudges (autonomy heartbeat):** the bot decides — on its own judgment — the single
+most-urgent open task and pings about THAT ONE only (`run_heartbeat` ranks via `_ranked`, the
+LLM picks one or replies `SILENT`). It then suppresses ONLY the task it nudged (`_suppress_after_nudge`
+fuzzy-matches the reply to a title, falling back to the top-ranked) so the next heartbeat is free
+to raise the next-urgent one — nudges trickle out one at a time. Spacing is spontaneous: after a
+nudge it records `next_proactive_at = now + random(NUDGE_MIN_GAP_MINUTES..NUDGE_MAX_GAP_MINUTES)`
+rather than a fixed cooldown. `HEARTBEAT_MINUTES` (the check cadence) must be ≤ `NUDGE_MIN_GAP_MINUTES`.
+The old `NUDGE_COOLDOWN_HOURS` is gone — replaced by the min/max gap pair.
 
 **Mission framing:** the system prompt frames the bot as genuinely invested in the user's
 productivity and EARNING — remember goals/clients/deadlines, prioritise by them, and don't
