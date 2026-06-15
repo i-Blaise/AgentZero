@@ -1,4 +1,8 @@
 .env
+.env.bak*
+.env.*
+!.env.example
+AGENT.pdf
 venv/
 __pycache__/
 *.pyc

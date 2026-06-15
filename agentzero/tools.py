@@ -195,6 +195,45 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "set_job_profile",
+        "description": (
+            "Save or update the user's job-hunting profile — their CV/background and what "
+            "roles they're looking for. Call this when the user shares their CV or describes "
+            "the kind of job they want. Used to match against postings."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "cv": {"type": "string", "description": "The user's CV / background summary (full text is fine)"},
+                "criteria": {
+                    "type": "string",
+                    "description": "What they're looking for: role, stack, remote/location, seniority, salary floor, etc.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "find_jobs",
+        "description": (
+            "Fetch fresh software/remote job postings from job boards (RemoteOK, Remotive, "
+            "We Work Remotely). Returns new postings; then YOU rank them against the user's "
+            "saved CV/criteria (shown in the prompt) and present the best matches with a one-"
+            "line fit reason and the apply link. Skip weak matches."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional keywords to filter by (e.g. 'python backend', 'react remote'). Omit to use the user's saved criteria.",
+                },
+                "limit": {"type": "integer", "description": "Max postings to fetch (default 15)"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_status",
         "description": "Get an overview of projects and their open tasks.",
         "parameters": {

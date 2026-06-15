@@ -117,6 +117,8 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "complete_reminder": _complete_reminder,
         "remember": _remember,
         "forget": _forget,
+        "set_job_profile": _set_job_profile,
+        "find_jobs": _find_jobs,
     }
     handler = handlers.get(tc.name)
     if handler is None:
@@ -486,3 +488,46 @@ async def _forget(chat_id: int, args: dict) -> str:
     await db.memory.delete_one({"_id": best["_id"]})
     await _log_event(chat_id, "forget", "memory", best["_id"], prev_state)
     return f'Forgot: {best["content"]}'
+
+
+# ---------------------------------------------------------------------------
+# Job hunting
+# ---------------------------------------------------------------------------
+
+async def _set_job_profile(chat_id: int, args: dict) -> str:
+    db = get_db()
+    cv = (args.get("cv") or "").strip()
+    criteria = (args.get("criteria") or "").strip()
+    if not cv and not criteria:
+        return "Give me your CV/background and/or what kind of role you're after."
+
+    update: dict = {"updated_at": datetime.now(timezone.utc)}
+    if cv:
+        update["cv"] = cv
+    if criteria:
+        update["criteria"] = criteria
+    await db.profile.update_one(
+        {"chat_id": chat_id}, {"$set": update, "$setOnInsert": {"chat_id": chat_id}}, upsert=True
+    )
+    parts = []
+    if cv:
+        parts.append("CV")
+    if criteria:
+        parts.append("job criteria")
+    return f"Saved your {' and '.join(parts)}. I'll match new postings against it."
+
+
+async def _find_jobs(chat_id: int, args: dict) -> str:
+    from agentzero.jobs import fetch_jobs, format_jobs
+
+    db = get_db()
+    query = args.get("query")
+    if not query:
+        prof = await db.profile.find_one({"chat_id": chat_id}) or {}
+        query = prof.get("criteria") or None
+    limit = int(args.get("limit") or 15)
+
+    jobs = await fetch_jobs(chat_id, query=query, limit=limit)
+    if not jobs:
+        return "No new postings right now (nothing fresh since last check)."
+    return format_jobs(jobs)

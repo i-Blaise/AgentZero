@@ -18,6 +18,7 @@ from agentzero.config import (
     ALLOWED_CHAT_ID,
     AUTONOMY_ENABLED,
     EVENING_DIGEST_ENABLED,
+    JOB_HUNT_ENABLED,
     MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
@@ -34,6 +35,7 @@ from agentzero.scheduler import (
     load_pending_reminders,
     schedule_evening_digest,
     schedule_heartbeat,
+    schedule_job_digest,
     schedule_morning_digest,
     schedule_reminder_followups,
     start_scheduler,
@@ -64,6 +66,8 @@ async def lifespan(app: FastAPI):
         schedule_morning_digest(ALLOWED_CHAT_ID)
     if EVENING_DIGEST_ENABLED:
         schedule_evening_digest(ALLOWED_CHAT_ID)
+    if JOB_HUNT_ENABLED:
+        schedule_job_digest(ALLOWED_CHAT_ID)
     if MCP_ENABLED:
         await load_mcp_tools()
 
@@ -188,6 +192,14 @@ async def process_update(update: Update) -> None:
         from agentzero.digest import send_evening_digest
 
         await send_evening_digest(chat_id)
+        return
+
+    if text.startswith("/jobs"):
+        from agentzero.jobs import send_job_digest
+
+        result = await send_job_digest(chat_id)
+        if result is None:
+            await send(chat_id, "No new postings, or no job profile yet — send me your CV and what you're after.")
         return
 
     if text.startswith("/undo"):

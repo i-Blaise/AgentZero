@@ -33,6 +33,8 @@ async def create_indexes() -> None:
     await db.reminders.create_index([("chat_id", 1), ("status", 1)])
     await db.memory.create_index([("chat_id", 1)])
     await db.system_state.create_index([("chat_id", 1)], unique=True)
+    await db.profile.create_index([("chat_id", 1)], unique=True)
+    await db.seen_jobs.create_index([("chat_id", 1), ("url", 1)], unique=True)
 
 
 async def close() -> None:

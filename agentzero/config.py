@@ -52,6 +52,11 @@ EVENING_DIGEST_MINUTE: int = int(os.environ.get("EVENING_DIGEST_MINUTE", "30"))
 # Persistent reminders — a fired reminder keeps nudging until the user confirms it's done
 REMINDER_FOLLOWUP_MINUTES: int = int(os.environ.get("REMINDER_FOLLOWUP_MINUTES", "90"))
 
+# Job hunter — daily drop of new matching postings
+JOB_HUNT_ENABLED: bool = os.environ.get("JOB_HUNT_ENABLED", "true").lower() == "true"
+JOB_DIGEST_HOUR: int = int(os.environ.get("JOB_DIGEST_HOUR", "9"))    # 09:00
+JOB_DIGEST_MINUTE: int = int(os.environ.get("JOB_DIGEST_MINUTE", "0"))
+
 # MCP — external platform servers (Gmail, Calendar, …)
 MCP_ENABLED: bool = os.environ.get("MCP_ENABLED", "false").lower() == "true"
 # URL of the Google Workspace MCP server (streamable-http), e.g. http://127.0.0.1:8001/mcp

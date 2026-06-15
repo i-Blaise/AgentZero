@@ -97,7 +97,18 @@ adapter translates them and manages its own native multi-turn message format ins
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
 `get_status`, `set_reminder`, `list_reminders`, `cancel_reminder`, `complete_reminder`,
-`remember`, `forget`. MCP tools are added at runtime, namespaced `google__…` etc.
+`remember`, `forget`, `set_job_profile`, `find_jobs`. MCP tools added at runtime, `google__…`.
+
+**Job hunter** (`jobs.py`): pulls software/remote postings from free sources (RemoteOK,
+Remotive, We Work Remotely RSS — no API keys, no scraping). `find_jobs` fetches new
+postings (deduped against the `seen_jobs` collection); the model ranks them against the
+user's saved CV/criteria (`profile` collection, injected into the prompt) and surfaces
+matches. `set_job_profile` saves CV + criteria. The `profile` doc also holds `manual` (Blaise's
+authored operating manual — goals, projects, priorities, how to work with him), injected
+into the system prompt by `build_system_prompt` as authoritative context. Daily "job drop" digest (`send_job_digest`,
+`scheduler.schedule_job_digest`, `JOB_DIGEST_HOUR`/`MINUTE`, only sends if new matches);
+`/jobs` triggers on demand. Add more sources by adding a fetcher to `jobs.py`; paid
+search API (Tavily/Brave/SerpAPI) is the planned breadth upgrade.
 
 **Persistent reminders:** a fired reminder does NOT auto-complete — it goes to
 `status="awaiting_ack"` and a follow-up loop (`scheduler._reminder_followup_job`,
@@ -112,7 +123,7 @@ let commitments silently drop. Completion always requires the user's explicit wo
 ### Bot commands (fallbacks / manual triggers)
 `/start` `/status [work|personal]` `/undo` `/done <task>` `/add <project> | <task>`
 `/snooze <task> until <YYYY-MM-DD>` `/checkin` (force heartbeat) `/brief` (force morning
-digest) `/winddown` (force evening digest).
+digest) `/winddown` (force evening digest) `/jobs` (force job drop).
 
 ## Conventions & gotchas (read before editing)
 

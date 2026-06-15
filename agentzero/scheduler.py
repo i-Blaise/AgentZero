@@ -20,6 +20,8 @@ from agentzero.config import (
     EVENING_DIGEST_HOUR,
     EVENING_DIGEST_MINUTE,
     HEARTBEAT_MINUTES,
+    JOB_DIGEST_HOUR,
+    JOB_DIGEST_MINUTE,
     MORNING_DIGEST_HOUR,
     MORNING_DIGEST_MINUTE,
     REMINDER_FOLLOWUP_MINUTES,
@@ -222,6 +224,30 @@ async def _evening_digest_job(chat_id: int) -> None:
         await send_evening_digest(chat_id)
     except Exception:
         logger.exception("Evening digest job failed")
+
+
+async def _job_digest_job(chat_id: int) -> None:
+    from agentzero.jobs import send_job_digest
+
+    try:
+        await send_job_digest(chat_id)
+    except Exception:
+        logger.exception("Job digest job failed")
+
+
+def schedule_job_digest(chat_id: int) -> None:
+    sched = get_scheduler()
+    sched.add_job(
+        _job_digest_job,
+        trigger=CronTrigger(hour=JOB_DIGEST_HOUR, minute=JOB_DIGEST_MINUTE),
+        args=[chat_id],
+        id="job_digest",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "Job drop scheduled daily at %02d:%02d", JOB_DIGEST_HOUR, JOB_DIGEST_MINUTE
+    )
 
 
 def schedule_evening_digest(chat_id: int) -> None:
