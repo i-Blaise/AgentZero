@@ -4,19 +4,31 @@ nothing outside this file may import openai or anthropic directly.
 
 Protocol:
   chat(messages, system) -> str
-  chat_with_tools(messages, system, tools, image, image_mime) -> LLMResponse
+  chat_with_tools(messages, system, tools, image, image_mime) -> LLMResponse   (single pass)
+  run_tool_loop(messages, system, tools, execute, ...) -> LoopResult            (agentic loop)
 
 Tool definitions are in neutral JSON Schema format (tools.py).
 Each provider translates to its own wire format internally.
 Image bytes (if provided) are injected into the last user message in the
 provider's multimodal format; history messages remain plain text.
+
+run_tool_loop is the real agentic loop: it calls the model, runs any tools it
+asks for via the `execute` callback, feeds the results back, and repeats until
+the model produces a final answer (or max_iters is hit). This is what lets the
+bot CHAIN tools — e.g. search Gmail for ids, then fetch each message's body.
 """
 from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Awaitable, Callable, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
+
+# Callback the loop uses to run one tool: (name, args) -> human-readable result string.
+ExecuteFn = Callable[[str, dict], Awaitable[str]]
 
 
 @dataclass
@@ -32,6 +44,13 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
+@dataclass
+class LoopResult:
+    text: str                                  # final natural-language answer
+    tool_calls_made: int = 0
+    last_results: list[str] = field(default_factory=list)  # fallback if text is empty
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     async def chat(self, messages: list[dict], system: str) -> str: ...
@@ -43,6 +62,16 @@ class LLMProvider(Protocol):
         image: bytes | None = None,
         image_mime: str = "image/jpeg",
     ) -> LLMResponse: ...
+    async def run_tool_loop(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        execute: ExecuteFn,
+        image: bytes | None = None,
+        image_mime: str = "image/jpeg",
+        max_iters: int = 6,
+    ) -> LoopResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +158,62 @@ class OpenAIProvider:
                 )
         return LLMResponse(content=msg.content, tool_calls=calls)
 
+    async def run_tool_loop(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        execute: ExecuteFn,
+        image: bytes | None = None,
+        image_mime: str = "image/jpeg",
+        max_iters: int = 6,
+    ) -> LoopResult:
+        base = self._inject_image(messages, image, image_mime) if image else messages
+        convo: list[dict] = [{"role": "system", "content": system}] + [dict(m) for m in base]
+        oa_tools = self._to_openai_tools(tools)
+        made = 0
+        last_results: list[str] = []
+
+        for _ in range(max_iters):
+            resp = await self._client.chat.completions.create(
+                model=self.chat_model, messages=convo, tools=oa_tools, tool_choice="auto"
+            )
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                return LoopResult((msg.content or "").strip(), made, last_results)
+
+            convo.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                }
+            )
+            last_results = []
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = await execute(tc.function.name, args)
+                made += 1
+                last_results.append(result)
+                convo.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+        # Ran out of iterations — get a final answer without offering more tools.
+        resp = await self._client.chat.completions.create(model=self.chat_model, messages=convo)
+        return LoopResult((resp.choices[0].message.content or "").strip(), made, last_results)
+
 
 # ---------------------------------------------------------------------------
 # Anthropic provider
@@ -214,6 +299,58 @@ class AnthropicProvider:
                     ToolCall(name=block.name, args=block.input, call_id=block.id)
                 )
         return LLMResponse(content=text, tool_calls=calls)
+
+    async def run_tool_loop(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict],
+        execute: ExecuteFn,
+        image: bytes | None = None,
+        image_mime: str = "image/jpeg",
+        max_iters: int = 6,
+    ) -> LoopResult:
+        msgs: list[dict] = [
+            dict(m)
+            for m in (self._inject_image(messages, image, image_mime) if image else messages)
+        ]
+        an_tools = self._to_anthropic_tools(tools)
+        made = 0
+        last_results: list[str] = []
+
+        def _text(content) -> str:
+            return "".join(
+                b.text for b in content if getattr(b, "type", None) == "text"
+            ).strip()
+
+        for _ in range(max_iters):
+            resp = await self._client.messages.create(
+                model=self.chat_model,
+                max_tokens=4096,
+                system=system,
+                messages=msgs,
+                tools=an_tools,
+            )
+            tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+            if not tool_uses:
+                return LoopResult(_text(resp.content), made, last_results)
+
+            msgs.append({"role": "assistant", "content": resp.content})
+            last_results = []
+            tool_results = []
+            for tu in tool_uses:
+                result = await execute(tu.name, tu.input)
+                made += 1
+                last_results.append(result)
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": tu.id, "content": result}
+                )
+            msgs.append({"role": "user", "content": tool_results})
+
+        resp = await self._client.messages.create(
+            model=self.chat_model, max_tokens=4096, system=system, messages=msgs
+        )
+        return LoopResult(_text(resp.content), made, last_results)
 
 
 # ---------------------------------------------------------------------------

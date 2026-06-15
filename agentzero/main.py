@@ -309,37 +309,25 @@ async def _handle_nl(
     system = await build_system_prompt()
     llm = get_provider()
     tools = TOOLS + get_mcp_tools()
-    response = await llm.chat_with_tools(history, system, tools, image=image, image_mime=image_mime)
 
-    # Execute tool calls — local tools run on the executor, MCP tools route to their server.
-    results: list[tuple[str, str]] = []
-    for tc in response.tool_calls:
-        if is_mcp_tool(tc.name):
-            results.append((tc.name, await call_mcp_tool(tc.name, tc.args)))
-        else:
-            results.append((tc.name, await execute_tool(chat_id, tc)))
+    async def _execute(name: str, args: dict) -> str:
+        # Local tools run on the executor; MCP tools route to their server.
+        if is_mcp_tool(name):
+            return await call_mcp_tool(name, args)
+        return await execute_tool(chat_id, ToolCall(name=name, args=args))
 
-    if not response.tool_calls:
-        reply = response.content or "Done."
-    else:
-        # Narrate the outcome in voice. The executor/MCP results are the FACTS;
-        # the LLM turns them into one natural reply instead of a list of robotic
-        # confirmations (and collapses repeated successes/errors into one message).
-        joined = "\n".join(f"- {out}" for _name, out in results)
-        narration = (
-            f'The user said: "{text}"\n\n'
-            f"You acted on it. Here is exactly what happened — these are the facts, "
-            f"don't contradict them or invent anything beyond them:\n{joined}\n\n"
-            "Reply to the user in your voice: natural and conversational, not a list of "
-            "confirmations. If several similar things happened, sum them up together rather "
-            "than enumerating each one. If something failed or is blocked, say so once and "
-            "suggest the fix — don't repeat the same error line. Keep it tight."
+    # Agentic loop: the model can call tools, see results, and call more (e.g. search
+    # Gmail for ids, then fetch each body) before producing its final answer in voice.
+    try:
+        result = await llm.run_tool_loop(
+            history, system, tools, _execute, image=image, image_mime=image_mime
         )
-        try:
-            reply = (await llm.chat([{"role": "user", "content": narration}], system)).strip() or joined
-        except Exception:
-            logger.exception("Tool-result narration failed — sending raw results")
-            reply = joined
+        reply = result.text or (
+            "\n".join(result.last_results) if result.last_results else "Done."
+        )
+    except Exception:
+        logger.exception("Tool loop failed for chat %s", chat_id)
+        reply = "Something went wrong handling that — give it another go in a moment."
 
     await db.chat_history.insert_one(
         {

@@ -56,12 +56,19 @@ An agent can do everything EXCEPT step 4 (browser approval) — hand that to the
 ## Core architecture
 
 NL write path: **Telegram → FastAPI webhook → load chat history + store snapshot →
-LLM with tool definitions → executor validates/applies tool calls → bot confirms.**
+agentic tool LOOP → bot replies.**
+
+The loop (`llm.run_tool_loop`, used by `main._handle_nl`): the model calls tools, sees
+the results, and can call MORE tools before answering — repeating until it produces a
+final reply or hits `max_iters` (6). This is what lets it CHAIN calls (e.g. search Gmail
+for ids → fetch each body → summarise). `_handle_nl` passes an `execute(name, args)`
+callback that routes local tools to `executor.py` and `google__*` tools to `mcp_client`.
+The model's final text IS the reply (narrated in voice); there's no separate narration pass.
 
 The LLM **never writes to the DB directly.** It proposes tool calls; the deterministic
 `executor.py` validates and applies them, logging every write to the `events`
-collection so `/undo` can reverse it. Tools are defined in a neutral JSON-Schema
-format and each LLM provider adapter translates them internally.
+collection so `/undo` can reverse it. Tools are neutral JSON-Schema; each provider
+adapter translates them and manages its own native multi-turn message format inside the loop.
 
 ### File map (`agentzero/`)
 | File | Responsibility |
@@ -117,13 +124,13 @@ digest) `/winddown` (force evening digest).
 - **Personality is for the BOT, not for you.** The `PERSONALITY` constant (witty,
   dry, sarcastic) governs LLM-generated bot text (chitchat replies, autonomy briefs,
   digests, reminder firing). Your own responses to Blaise stay normal/clear.
-- **Tool results are narrated in voice.** The executor returns flat deterministic
-  strings (e.g. `Created project "X"`) — those are the FACTS, but `_handle_nl` runs
-  every tool-using turn's results through a second `llm.chat()` pass so the user gets
-  one natural reply, not a list of robotic confirmations (collapses repeated
-  successes/errors too). Same pass covers MCP results. Falls back to the raw joined
-  strings if that LLM call fails. Cost: one extra LLM call per tool-using turn — kept
-  deliberately because Blaise wants natural language over the micro-optimization.
+- **Replies are produced by the tool loop, in voice.** The executor returns flat
+  deterministic strings (e.g. `Created project "X"`) as the FACTS the model sees; the
+  model then writes the natural final reply itself (it has the PERSONALITY system prompt).
+  No separate narration pass anymore — the loop's final text is the reply. If the model
+  ends with no text, `_handle_nl` falls back to the joined tool results, else "Done."
+  Cost: a tool-using turn is now multiple LLM rounds (one per tool step) — accepted for
+  the capability (chaining) and natural language.
 - **"Most recent event" queries sort by `_id` desc, not `created_at`** — in-process
   timestamps collide at ms resolution; ObjectId is monotonic. Use the cursor pattern
   `.find().sort(...).limit(1).to_list(1)`, NOT `find_one(sort=...)` (mongomock ignores it).

@@ -190,17 +190,23 @@ async def test_get_status_scope_filter(mock_db):
 
 @pytest.mark.asyncio
 async def test_no_db_writes_for_chitchat(mock_db):
-    """When the LLM returns no tool calls, the executor is never called."""
-    from agentzero.llm import LLMResponse
+    """When the loop makes no tool calls, the executor is never touched."""
+    from agentzero.llm import LoopResult
     from agentzero.main import process_update
 
-    mock_response = LLMResponse(content="Sure, how can I help?", tool_calls=[])
     mock_prov = MagicMock()
-    mock_prov.chat_with_tools = AsyncMock(return_value=mock_response)
+
+    async def fake_loop(messages, system, tools, execute,
+                        image=None, image_mime="image/jpeg", max_iters=6):
+        return LoopResult(text="Sure, how can I help?", tool_calls_made=0)
+
+    mock_prov.run_tool_loop = fake_loop
 
     update = MagicMock()
     update.message.chat_id = CHAT_ID
     update.message.text = "Hey, how are you?"
+    update.message.voice = None
+    update.message.photo = None
 
     with patch("agentzero.main.ALLOWED_CHAT_ID", CHAT_ID), \
          patch("agentzero.main.get_provider", return_value=mock_prov), \
@@ -208,8 +214,7 @@ async def test_no_db_writes_for_chitchat(mock_db):
          patch("agentzero.main.send", new_callable=AsyncMock) as mock_send:
         await process_update(update)
         mock_send.assert_called_once()
-        sent_text = mock_send.call_args[0][1]
-        assert sent_text  # non-empty reply
+        assert mock_send.call_args[0][1]  # non-empty reply
 
     # No projects or tasks written
     assert await mock_db.projects.count_documents({}) == 0
