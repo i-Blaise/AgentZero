@@ -57,6 +57,14 @@ JOB_HUNT_ENABLED: bool = os.environ.get("JOB_HUNT_ENABLED", "true").lower() == "
 JOB_DIGEST_HOUR: int = int(os.environ.get("JOB_DIGEST_HOUR", "9"))    # 09:00
 JOB_DIGEST_MINUTE: int = int(os.environ.get("JOB_DIGEST_MINUTE", "0"))
 
+# Web search / fetch — gives the bot eyes on the internet for research & current info.
+# web_fetch needs no key. web_search uses a backend: Tavily (recommended — LLM-friendly,
+# free tier) or Brave (free tier). With no key set, it falls back to keyless DuckDuckGo,
+# which is best-effort and often blocked from datacenter IPs — set a key for reliability.
+WEB_SEARCH_PROVIDER: str = os.environ.get("WEB_SEARCH_PROVIDER", "auto")  # auto|tavily|brave|duckduckgo
+TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
+BRAVE_API_KEY: str = os.environ.get("BRAVE_API_KEY", "")
+
 # MCP — external platform servers (Gmail, Calendar, …)
 MCP_ENABLED: bool = os.environ.get("MCP_ENABLED", "false").lower() == "true"
 # URL of the Google Workspace MCP server (streamable-http), e.g. http://127.0.0.1:8001/mcp

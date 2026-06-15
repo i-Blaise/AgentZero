@@ -234,6 +234,85 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "snooze_reminder",
+        "description": (
+            "Push a reminder's next ping further out — for 'remind me later', 'not now', "
+            "'give me an hour', 'ping me about that this evening'. Works on a fired reminder "
+            "that's awaiting confirmation (delays the next nudge) or a still-pending one "
+            "(moves when it first fires). Defaults to 60 minutes if no time is given. Omit "
+            "'query' to push ALL outstanding reminders."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword/phrase identifying which reminder (fuzzy matched). Omit to apply to all outstanding reminders.",
+                },
+                "minutes": {
+                    "type": "integer",
+                    "description": "How many minutes to push it out (default 60).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "set_reminder_cadence",
+        "description": (
+            "Change how often the bot re-nudges about reminders the user hasn't confirmed "
+            "done — for 'space the reminders apart', 'stop nagging so often', 'sparse it out', "
+            "'nudge me every 3 hours', or 'tighten it up'. Sets the gap between follow-up nudges "
+            "in minutes (clamped to a sane range). Higher = less frequent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "minutes": {
+                    "type": "integer",
+                    "description": "Minutes between follow-up nudges (e.g. 180 for every 3 hours).",
+                }
+            },
+            "required": ["minutes"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for current information, facts, prices, news, documentation, or "
+            "anything you don't already know or that may have changed since your training. "
+            "Returns a ranked list of results (title, URL, snippet). Use this BEFORE answering "
+            "any question that depends on up-to-date or external information, then optionally "
+            "call web_fetch on the most promising result to read it in full."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "How many results to return (default 5, max 10).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": (
+            "Fetch a single web page (or API/text URL) and return its readable text content. "
+            "Use after web_search to read a promising result in full, or when the user gives "
+            "you a URL to read/summarise. Pass a full http(s):// URL."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full http(s):// URL to fetch."}
+            },
+            "required": ["url"],
+        },
+    },
+    {
         "name": "get_status",
         "description": "Get an overview of projects and their open tasks.",
         "parameters": {

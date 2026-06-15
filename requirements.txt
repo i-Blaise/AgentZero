@@ -10,7 +10,7 @@ openai>=1.30.0
 mcp>=1.2.0                 # MCP client (Gmail/Calendar and other servers)
 python-dotenv==1.0.0
 pydantic>=2.0.0
-httpx>=0.27.0             # job-board API/RSS fetching
+httpx>=0.27.0             # job-board API/RSS fetching + web search/fetch tools
 
 # dev / test
 pytest>=8.0.0

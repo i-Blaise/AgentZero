@@ -8,7 +8,7 @@ Fuzzy matching uses difflib SequenceMatcher (threshold 0.4).
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -115,10 +115,14 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "list_reminders": _list_reminders,
         "cancel_reminder": _cancel_reminder,
         "complete_reminder": _complete_reminder,
+        "snooze_reminder": _snooze_reminder,
+        "set_reminder_cadence": _set_reminder_cadence,
         "remember": _remember,
         "forget": _forget,
         "set_job_profile": _set_job_profile,
         "find_jobs": _find_jobs,
+        "web_search": _web_search,
+        "web_fetch": _web_fetch,
     }
     handler = handlers.get(tc.name)
     if handler is None:
@@ -444,6 +448,69 @@ async def _cancel_reminder(chat_id: int, args: dict) -> str:
     return f'Cancelled reminder: "{best["text"]}".'
 
 
+async def _snooze_reminder(chat_id: int, args: dict) -> str:
+    """Push a reminder's next ping further out ('remind me later')."""
+    from agentzero.scheduler import schedule_reminder
+
+    db = get_db()
+    minutes = int(args.get("minutes") or 60)
+    if minutes <= 0:
+        minutes = 60
+    query = (args.get("query") or "").strip()
+
+    rows = await db.reminders.find(
+        {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
+    ).to_list(None)
+    if not rows:
+        return "No active reminders to push back."
+
+    if query:
+        best = max(rows, key=lambda r: _sim(query, r["text"]))
+        if _sim(query, best["text"]) < 0.3:
+            return f'No active reminder matching "{query}".'
+        targets = [best]
+    else:
+        targets = rows  # push everything outstanding
+
+    now = datetime.now(timezone.utc)
+    new_at = now + timedelta(minutes=minutes)
+    for r in targets:
+        if r.get("status") == "awaiting_ack":
+            # Delay the next follow-up nudge.
+            await db.reminders.update_one(
+                {"_id": r["_id"]}, {"$set": {"next_nudge_at": new_at}}
+            )
+        else:
+            # Still pending — move when it first fires and reschedule the job.
+            await db.reminders.update_one(
+                {"_id": r["_id"]}, {"$set": {"fire_at": new_at}}
+            )
+            schedule_reminder(str(r["_id"]), chat_id, r["text"], new_at)
+
+    pretty = f"{minutes} min" if minutes < 120 else f"{round(minutes / 60, 1)} h"
+    if len(targets) == 1:
+        return f'Pushed "{targets[0]["text"]}" back by {pretty}.'
+    return f"Pushed all {len(targets)} reminders back by {pretty}."
+
+
+async def _set_reminder_cadence(chat_id: int, args: dict) -> str:
+    """Change how often follow-up nudges fire ('space them apart')."""
+    from agentzero.scheduler import clamp_followup_minutes
+
+    raw = args.get("minutes")
+    if raw is None:
+        return "Tell me how often — e.g. every 60 minutes, or every 3 hours."
+    minutes = clamp_followup_minutes(int(raw))
+    db = get_db()
+    await db.system_state.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"nudge_interval_minutes": minutes}},
+        upsert=True,
+    )
+    pretty = f"{minutes} min" if minutes < 120 else f"{round(minutes / 60, 1)} h"
+    return f"Done — I'll re-nudge about unfinished reminders every {pretty} now."
+
+
 # ---------------------------------------------------------------------------
 # Memory
 # ---------------------------------------------------------------------------
@@ -531,3 +598,19 @@ async def _find_jobs(chat_id: int, args: dict) -> str:
     if not jobs:
         return "No new postings right now (nothing fresh since last check)."
     return format_jobs(jobs)
+
+
+# ---------------------------------------------------------------------------
+# Web (search + fetch) — no DB writes, so nothing is logged to /undo
+# ---------------------------------------------------------------------------
+
+async def _web_search(chat_id: int, args: dict) -> str:
+    from agentzero.web import web_search
+
+    return await web_search(args["query"], int(args.get("max_results") or 5))
+
+
+async def _web_fetch(chat_id: int, args: dict) -> str:
+    from agentzero.web import web_fetch
+
+    return await web_fetch(args["url"])

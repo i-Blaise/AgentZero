@@ -15,9 +15,10 @@ a work tracker and grew into a general assistant. It runs 24/7 on a VPS and is *
 in production**.
 
 Capabilities: projects/tasks, ad-hoc reminders, freeform memory, voice notes
-(Whisper transcription), image input (vision), a proactive autonomy heartbeat, a
-daily morning digest, and an MCP client layer for external platforms — Gmail +
-Google Calendar read access is LIVE (see "Google … LIVE" section below).
+(Whisper transcription), image input (vision), web search + page fetch (research
+inside the chat), a proactive autonomy heartbeat, a daily morning digest, and an
+MCP client layer for external platforms — Gmail + Google Calendar read access is
+LIVE (see "Google … LIVE" section below).
 
 ## Google (Gmail + Calendar) — LIVE (read-only) as of 2026-06-14
 
@@ -85,6 +86,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `autonomy.py` | Proactive heartbeat — gathers candidates, LLM decides send-or-SILENT |
 | `digest.py` | Morning digest — daily rundown, always sends |
 | `mcp_client.py` | Generic MCP client — connect, namespace (`server__tool`), route calls |
+| `web.py` | Web search (Tavily/Brave/DuckDuckGo) + page fetch (httpx, dependency-free HTML→text). No DB writes. |
 | `audio.py` | Whisper voice transcription (always OpenAI) |
 | `telegram_io.py` | `send()` with 4096-char splitting |
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
@@ -97,7 +99,14 @@ adapter translates them and manages its own native multi-turn message format ins
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
 `get_status`, `set_reminder`, `list_reminders`, `cancel_reminder`, `complete_reminder`,
-`remember`, `forget`, `set_job_profile`, `find_jobs`. MCP tools added at runtime, `google__…`.
+`snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`, `set_job_profile`,
+`find_jobs`, `web_search`, `web_fetch`. MCP tools added at runtime, `google__…`.
+
+**Web search/fetch** (`web.py`): `web_search` picks a backend via `WEB_SEARCH_PROVIDER`
+(`auto` → Tavily key, else Brave key, else keyless DuckDuckGo). `web_fetch` needs no key
+(httpx GET + regex HTML→text, truncated to 6k chars). DuckDuckGo fallback is best-effort and
+often blocked from the VPS's datacenter IP — set `TAVILY_API_KEY` (free tier) for reliability.
+The prompt tells the model to search-then-fetch for anything current/external rather than guess.
 
 **Job hunter** (`jobs.py`): pulls software/remote postings from free sources (RemoteOK,
 Remotive, We Work Remotely RSS — no API keys, no scraping). `find_jobs` fetches new
@@ -112,9 +121,18 @@ search API (Tavily/Brave/SerpAPI) is the planned breadth upgrade.
 
 **Persistent reminders:** a fired reminder does NOT auto-complete — it goes to
 `status="awaiting_ack"` and a follow-up loop (`scheduler._reminder_followup_job`,
-interval, quiet-hours-aware) keeps re-nudging until the user confirms. `complete_reminder`
+quiet-hours-aware) keeps re-nudging until the user confirms. `complete_reminder`
 (called when the user says "done/sorted") marks it `done` and stops nudges. Reminder
-statuses: pending → awaiting_ack → done (or cancelled). `REMINDER_FOLLOWUP_MINUTES` config.
+statuses: pending → awaiting_ack → done (or cancelled).
+- **No more dumps:** the follow-up loop wakes every `_FOLLOWUP_WAKE_MINUTES` (15) but sends
+  ONE consolidated message covering all due reminders (`_phrase_reminder_batch`) — a backlog
+  never fires 5-8 separate pings. Per-reminder `next_nudge_at` gates whether each one is due.
+- **Cadence is user-adjustable:** "space them apart / stop nagging so often" → `set_reminder_cadence`
+  stores `nudge_interval_minutes` per chat in `system_state` (clamped 30–1440 by
+  `clamp_followup_minutes`); `_followup_minutes(chat_id)` reads it, falling back to
+  `REMINDER_FOLLOWUP_MINUTES`. Both `_fire_reminder` and the follow-up loop use it.
+- **"Remind me later" → `snooze_reminder`:** pushes `next_nudge_at` (awaiting_ack) or re-schedules
+  `fire_at` (pending) by N minutes (default 60); omit `query` to push all outstanding.
 
 **Mission framing:** the system prompt frames the bot as genuinely invested in the user's
 productivity and EARNING — remember goals/clients/deadlines, prioritise by them, and don't
@@ -156,7 +174,7 @@ digest) `/winddown` (force evening digest) `/jobs` (force job drop).
 
 ```bash
 # Tests (mongomock-motor, no real DB or API needed)
-source venv/bin/activate && pytest -q          # currently 43 tests, keep green
+source venv/bin/activate && pytest -q          # currently 66 tests, keep green
 
 # Run locally (polling mode)
 uvicorn agentzero.main:app --port 8080
@@ -174,8 +192,8 @@ uvicorn agentzero.main:app --port 8080
 
 ## Status & what's next
 
-**Done & live:** projects/tasks, reminders, memory, voice, images, autonomy heartbeat,
-morning digest, MCP client layer (code).
+**Done & live:** projects/tasks, reminders (consolidated nudges + NL snooze/cadence controls),
+memory, voice, images, web search/fetch, autonomy heartbeat, morning digest, MCP client layer (code).
 
 **Gmail + Calendar via MCP — DONE & LIVE (2026-06-14):** read-only, working in
 production. See the "Google … LIVE" section above for the full wiring and re-auth runbook.

@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
+# How often the follow-up loop wakes to check; per-reminder cadence (next_nudge_at)
+# gates whether each one actually nudges, so this only needs to be fine enough.
+_FOLLOWUP_WAKE_MINUTES = 15
+# Bounds for the user-adjustable re-nudge cadence ("space them apart").
+_CADENCE_MIN = 30
+_CADENCE_MAX = 24 * 60
+
+
+def clamp_followup_minutes(minutes: int) -> int:
+    """Clamp a requested re-nudge cadence into a sane range."""
+    return max(_CADENCE_MIN, min(int(minutes), _CADENCE_MAX))
+
+
+async def _followup_minutes(chat_id: int) -> int:
+    """The user's chosen re-nudge cadence, or the configured default."""
+    db = get_db()
+    state = await db.system_state.find_one({"chat_id": chat_id}) or {}
+    override = state.get("nudge_interval_minutes")
+    return clamp_followup_minutes(override) if override else REMINDER_FOLLOWUP_MINUTES
+
 
 def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
@@ -79,11 +99,40 @@ async def _phrase_reminder(text: str) -> str:
         return f"⏰ Reminder: {text}"
 
 
+async def _phrase_reminder_batch(texts: list[str]) -> str:
+    """Render a SINGLE nudge covering several unfinished reminders, in voice."""
+    from agentzero.llm import get_provider
+    from agentzero.prompts import PERSONALITY
+
+    plain = "⏰ Still open — tell me when any of these are handled:\n" + "\n".join(
+        f"• {t}" for t in texts
+    )
+    system = (
+        f"{PERSONALITY}\n\n"
+        "The user has several reminders they still haven't confirmed done. Deliver ONE "
+        "short Telegram message that nudges them about ALL of them together — start with the "
+        "⏰ emoji, list each item on its own line so none get lost, dry tone is fine. Make it "
+        "clear they should tell you when each is handled. One message, no preamble or sign-off."
+    )
+    try:
+        msg = (
+            await get_provider().chat(
+                [{"role": "user", "content": "Unfinished reminders:\n" + "\n".join(texts)}],
+                system,
+            )
+        ).strip()
+        return msg or plain
+    except Exception:
+        logger.exception("Batch reminder phrasing failed — falling back to plain text")
+        return plain
+
+
 async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
     try:
         await send(chat_id, await _phrase_reminder(text))
         db = get_db()
         now = datetime.now(timezone.utc)
+        gap = await _followup_minutes(chat_id)
         # Don't mark done — await the user's confirmation. It moves to awaiting_ack
         # and the follow-up loop keeps nudging until the user says it's handled.
         await db.reminders.update_one(
@@ -92,7 +141,7 @@ async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
                 "$set": {
                     "status": "awaiting_ack",
                     "fired_at": now,
-                    "next_nudge_at": now + timedelta(minutes=REMINDER_FOLLOWUP_MINUTES),
+                    "next_nudge_at": now + timedelta(minutes=gap),
                     "nudge_count": 0,
                 }
             },
@@ -102,7 +151,8 @@ async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
 
 
 async def _reminder_followup_job(chat_id: int) -> None:
-    """Re-nudge reminders the user fired but hasn't confirmed done. Quiet-hours aware."""
+    """Re-nudge reminders the user fired but hasn't confirmed done — in ONE consolidated
+    message so a backlog never dumps 5-8 separate pings at once. Quiet-hours aware."""
     from agentzero.autonomy import _in_quiet_hours
 
     db = get_db()
@@ -110,32 +160,42 @@ async def _reminder_followup_job(chat_id: int) -> None:
     if _in_quiet_hours(now.astimezone(ZoneInfo(TIMEZONE))):
         return
 
-    due = await db.reminders.find(
+    awaiting = await db.reminders.find(
         {"chat_id": chat_id, "status": "awaiting_ack"}
     ).to_list(None)
-    for r in due:
+
+    due = []
+    for r in awaiting:
         nxt = r.get("next_nudge_at")
         if nxt and nxt.tzinfo is None:
             nxt = nxt.replace(tzinfo=timezone.utc)
         if nxt and nxt > now:
             continue
-        count = r.get("nudge_count", 0) + 1
-        try:
-            await send(
-                chat_id,
-                await _phrase_reminder(
-                    f"{r['text']} (still not marked done — tell me when it's handled)"
-                ),
+        due.append(r)
+    if not due:
+        return
+
+    try:
+        if len(due) == 1:
+            message = await _phrase_reminder(
+                f"{due[0]['text']} (still not marked done — tell me when it's handled)"
             )
-        except Exception:
-            logger.exception("Follow-up nudge failed for reminder %s", r["_id"])
-            continue
+        else:
+            message = await _phrase_reminder_batch([r["text"] for r in due])
+        await send(chat_id, message)
+    except Exception:
+        logger.exception("Follow-up nudge failed for chat %s", chat_id)
+        return
+
+    gap = await _followup_minutes(chat_id)
+    next_at = now + timedelta(minutes=gap)
+    for r in due:
         await db.reminders.update_one(
             {"_id": r["_id"]},
             {
                 "$set": {
-                    "nudge_count": count,
-                    "next_nudge_at": now + timedelta(minutes=REMINDER_FOLLOWUP_MINUTES),
+                    "nudge_count": r.get("nudge_count", 0) + 1,
+                    "next_nudge_at": next_at,
                 }
             },
         )
@@ -145,7 +205,7 @@ def schedule_reminder_followups(chat_id: int) -> None:
     sched = get_scheduler()
     sched.add_job(
         _reminder_followup_job,
-        trigger=IntervalTrigger(minutes=max(15, REMINDER_FOLLOWUP_MINUTES // 3)),
+        trigger=IntervalTrigger(minutes=_FOLLOWUP_WAKE_MINUTES),
         args=[chat_id],
         id="reminder_followups",
         replace_existing=True,
