@@ -2,6 +2,7 @@
 Tool definitions in provider-neutral JSON Schema format.
 Each provider adapter in llm.py translates these to its own wire format.
 """
+from agentzero.config import YAHOO_MAIL_ENABLED
 
 TOOLS: list[dict] = [
     {
@@ -358,3 +359,45 @@ TOOLS: list[dict] = [
         },
     },
 ]
+
+
+# Yahoo Mail (read-only over IMAP) — only advertised to the model when configured.
+YAHOO_TOOLS: list[dict] = [
+    {
+        "name": "yahoo_search",
+        "description": (
+            "Search the user's Yahoo Mail (READ-ONLY) and return matching messages — each with "
+            "a uid, sender, subject and date. Pass a query to filter (matches anywhere in the "
+            "message), or omit it for the most recent. Then call yahoo_read with a uid to read "
+            "a message's full body. Use this whenever the user asks about their Yahoo email."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Text to search for; omit for most recent."},
+                "folder": {"type": "string", "description": 'Mailbox folder (default "INBOX"; e.g. "Sent", "Bulk").'},
+                "limit": {"type": "integer", "description": "Max messages to return (default 10, max 25)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "yahoo_read",
+        "description": (
+            "Read the full text body of one Yahoo Mail message by its uid (from yahoo_search), "
+            "READ-ONLY. Use this to actually read/summarise an email's contents rather than just "
+            "its subject line."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string", "description": "The message uid returned by yahoo_search."},
+                "folder": {"type": "string", "description": 'Folder the message is in (default "INBOX").'},
+            },
+            "required": ["uid"],
+        },
+    },
+]
+
+if YAHOO_MAIL_ENABLED:
+    TOOLS += YAHOO_TOOLS

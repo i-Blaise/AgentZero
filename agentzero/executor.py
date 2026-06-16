@@ -124,6 +124,8 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "find_jobs": _find_jobs,
         "web_search": _web_search,
         "web_fetch": _web_fetch,
+        "yahoo_search": _yahoo_search,
+        "yahoo_read": _yahoo_read,
     }
     handler = handlers.get(tc.name)
     if handler is None:
@@ -769,3 +771,21 @@ async def _web_fetch(chat_id: int, args: dict) -> str:
     from agentzero.web import web_fetch
 
     return await web_fetch(args["url"])
+
+
+# ---------------------------------------------------------------------------
+# Yahoo Mail (read-only over IMAP)
+# ---------------------------------------------------------------------------
+
+async def _yahoo_search(chat_id: int, args: dict) -> str:
+    from agentzero.yahoo_mail import yahoo_search
+
+    return await yahoo_search(
+        args.get("query", ""), args.get("folder", "INBOX"), int(args.get("limit") or 10)
+    )
+
+
+async def _yahoo_read(chat_id: int, args: dict) -> str:
+    from agentzero.yahoo_mail import yahoo_read
+
+    return await yahoo_read(args.get("uid", ""), args.get("folder", "INBOX"))

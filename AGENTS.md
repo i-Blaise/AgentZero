@@ -16,9 +16,9 @@ in production**.
 
 Capabilities: projects/tasks, ad-hoc reminders, freeform memory, voice notes
 (Whisper transcription), image input (vision), web search + page fetch (research
-inside the chat), a proactive autonomy heartbeat, a daily morning digest, and an
-MCP client layer for external platforms — Gmail + Google Calendar read access is
-LIVE (see "Google … LIVE" section below).
+inside the chat), read-only Yahoo Mail (IMAP, opt-in), a proactive autonomy heartbeat,
+a daily morning digest, and an MCP client layer for external platforms — Gmail + Google
+Calendar read access is LIVE (see "Google … LIVE" section below).
 
 ## Google (Gmail + Calendar) — LIVE (read-only) as of 2026-06-14
 
@@ -53,6 +53,17 @@ Gmail + Calendar read access is connected and working in production. How it's wi
 5. Restore ExecStart to `--transport streamable-http --read-only --tool-tier core`, daemon-reload,
    restart. Re-enable AgentZero `MCP_ENABLED=true`, restart agentzero.
 An agent can do everything EXCEPT step 4 (browser approval) — hand that to the owner.
+
+## Yahoo Mail — read-only (IMAP)
+
+Separate from Google (no MCP, no OAuth). `yahoo_mail.py` logs into `imap.mail.yahoo.com:993`
+with `YAHOO_MAIL_USER` + `YAHOO_MAIL_APP_PASSWORD` (a Yahoo **app password**, generated at
+Yahoo Account Security — NOT the login password). Tools `yahoo_search` (find messages → uids)
+and `yahoo_read` (fetch one message body) are added to the toolset only when
+`YAHOO_MAIL_ENABLED=true`. Read-only is enforced in code: mailbox opened `readonly=True`,
+messages fetched with `BODY.PEEK` (never marked seen/modified/deleted). UIDs are used so a
+uid from search stays valid for the follow-up read. To set up: generate the app password, set
+the three `YAHOO_MAIL_*` env vars, restart.
 
 ## Core architecture
 
@@ -94,6 +105,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `digest.py` | Morning digest — daily rundown, always sends |
 | `mcp_client.py` | Generic MCP client — connect, namespace (`server__tool`), route calls |
 | `web.py` | Web search (Tavily/Brave/DuckDuckGo) + page fetch (httpx, dependency-free HTML→text). No DB writes. |
+| `yahoo_mail.py` | Yahoo Mail read-only over IMAP (`imaplib`, app password). `yahoo_search`/`yahoo_read`; blocking work in `asyncio.to_thread`. Read-only enforced (readonly select + BODY.PEEK). |
 | `audio.py` | Whisper voice transcription (always OpenAI) |
 | `telegram_io.py` | `send()` with 4096-char splitting |
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
@@ -108,7 +120,8 @@ adapter translates them and manages its own native multi-turn message format ins
 Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
 `get_status`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
 `complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
-`set_job_profile`, `find_jobs`, `web_search`, `web_fetch`. MCP tools added at runtime, `google__…`.
+`set_job_profile`, `find_jobs`, `web_search`, `web_fetch`. When `YAHOO_MAIL_ENABLED`, also
+`yahoo_search`/`yahoo_read` (read-only Yahoo Mail over IMAP). MCP tools added at runtime, `google__…`.
 
 **Web search/fetch** (`web.py`): `web_search` picks a backend via `WEB_SEARCH_PROVIDER`
 (`auto` → Tavily key, else Brave key, else keyless DuckDuckGo). `web_fetch` needs no key

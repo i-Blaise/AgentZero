@@ -69,6 +69,13 @@ WEB_SEARCH_PROVIDER: str = os.environ.get("WEB_SEARCH_PROVIDER", "auto")  # auto
 TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 BRAVE_API_KEY: str = os.environ.get("BRAVE_API_KEY", "")
 
+# Yahoo Mail — read-only via IMAP. Needs a Yahoo *app password* (Account Security →
+# Generate app password), NOT your normal login password. Read-only is enforced in code
+# (mailbox opened read-only, messages fetched with PEEK, never modified or deleted).
+YAHOO_MAIL_ENABLED: bool = os.environ.get("YAHOO_MAIL_ENABLED", "false").lower() == "true"
+YAHOO_MAIL_USER: str = os.environ.get("YAHOO_MAIL_USER", "")
+YAHOO_MAIL_APP_PASSWORD: str = os.environ.get("YAHOO_MAIL_APP_PASSWORD", "")
+
 # MCP — external platform servers (Gmail, Calendar, …)
 MCP_ENABLED: bool = os.environ.get("MCP_ENABLED", "false").lower() == "true"
 # URL of the Google Workspace MCP server (streamable-http), e.g. http://127.0.0.1:8001/mcp
