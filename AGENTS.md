@@ -175,6 +175,13 @@ digest) `/winddown` (force evening digest) `/jobs` (force job drop).
   `.find().sort(...).limit(1).to_list(1)`, NOT `find_one(sort=...)` (mongomock ignores it).
 - `undo_last` uses `replace_one(upsert=True)` so it restores deletes (e.g. `forget`)
   as well as updates.
+- **Outgoing text is plain text.** Telegram messages are sent with no `parse_mode`
+  (free-form LLM output can't be safely escaped into MarkdownV2 without frequent send
+  failures). `telegram_io._to_plain()` strips Markdown + LaTeX the model sometimes emits
+  (`*…*`, `**…**`, `\[ … \]`, `\text{}`, `\times`, `[t](url)` …) so the user never sees raw
+  markup; the system prompt also tells the model to write plain text. Don't add `parse_mode`
+  unless you also add robust escaping. NB: `build_system_prompt` is one big f-string — literal
+  braces in prompt text must be doubled (`{{}}`) or it's a SyntaxError.
 - Scheduled/LLM features (reminders, digest) always have a **plain-text fallback** if
   the LLM call fails — a missed reminder is worse than a missed joke.
 - `datetime.utcnow()` is used widely and emits deprecation warnings on 3.12+. Harmless
