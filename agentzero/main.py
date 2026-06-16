@@ -245,7 +245,7 @@ async def process_update(update: Update) -> None:
         return
 
     # ---- NL path ------------------------------------------------------------
-    await _handle_nl(chat_id, text)
+    await _handle_nl(chat_id, text, reply_to=_quoted_context(msg))
 
 
 async def _handle_photo(chat_id: int, msg) -> None:
@@ -276,7 +276,7 @@ async def _handle_photo(chat_id: int, msg) -> None:
 
     logger.info("Photo received for chat %s: %d bytes", chat_id, len(image_bytes))
     text = msg.caption.strip() if msg.caption else "Describe what you see in this image and extract any tasks, to-dos, notes, or action items I should track. Don't worry about naming specific brands or products — focus on what I might need to do."
-    await _handle_nl(chat_id, text, image=image_bytes)
+    await _handle_nl(chat_id, text, image=image_bytes, reply_to=_quoted_context(msg))
 
 
 async def _handle_voice(chat_id: int, msg) -> None:
@@ -298,7 +298,7 @@ async def _handle_voice(chat_id: int, msg) -> None:
 
     # Echo transcription so the user can see what was heard
     await send(chat_id, f'🎤 "{text}"')
-    await _handle_nl(chat_id, text)
+    await _handle_nl(chat_id, text, reply_to=_quoted_context(msg))
 
 
 async def _thinking_filler(chat_id: int) -> None:
@@ -313,8 +313,31 @@ async def _thinking_filler(chat_id: int) -> None:
         logger.exception("Thinking filler failed for chat %s", chat_id)
 
 
+def _quoted_context(msg) -> str | None:
+    """If the user replied to a specific message (Telegram's reply feature), return a short
+    description of that quoted message so the model knows what's being referenced."""
+    q = getattr(msg, "reply_to_message", None)
+    if not q:
+        return None
+    body = (q.text or q.caption or "").strip()
+    if not body:
+        if getattr(q, "photo", None):
+            body = "[an image]"
+        elif getattr(q, "voice", None):
+            body = "[a voice message]"
+        else:
+            body = "[a non-text message]"
+    by_bot = bool(getattr(q, "from_user", None) and q.from_user.is_bot)
+    whose = "your own earlier message" if by_bot else "an earlier message"
+    return f'{whose}: "{body}"'
+
+
 async def _handle_nl(
-    chat_id: int, text: str, image: bytes | None = None, image_mime: str = "image/jpeg"
+    chat_id: int,
+    text: str,
+    image: bytes | None = None,
+    image_mime: str = "image/jpeg",
+    reply_to: str | None = None,
 ) -> None:
     db = get_db()
     # Immediate "typing…" so the user sees activity; a witty text filler follows only if
@@ -323,6 +346,10 @@ async def _handle_nl(
         await get_bot().send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     except Exception:
         pass
+
+    # When the user replied to a specific message, prepend that quoted context so the model
+    # (and stored history) knows exactly what they're referring to.
+    user_content = f'[Replying to {reply_to}]\n{text}' if reply_to else text
 
     # Load last 10 messages (oldest first)
     history_docs = (
@@ -333,10 +360,10 @@ async def _handle_nl(
     )
     history_docs.reverse()
     history = [{"role": d["role"], "content": d["content"]} for d in history_docs]
-    history.append({"role": "user", "content": text})
+    history.append({"role": "user", "content": user_content})
 
     await db.chat_history.insert_one(
-        {"chat_id": chat_id, "role": "user", "content": text, "created_at": datetime.utcnow()}
+        {"chat_id": chat_id, "role": "user", "content": user_content, "created_at": datetime.utcnow()}
     )
 
     system = await build_system_prompt()

@@ -68,7 +68,10 @@ The model's final text IS the reply (narrated in voice); there's no separate nar
 `_handle_nl` sends a `ChatAction.TYPING` immediately, and a witty "still working" filler
 (`prompts.THINKING_FILLERS`, picked at random) only if the loop runs longer than
 `THINKING_FILLER_SECONDS` — the filler task is cancelled the moment the answer is ready, so
-fast replies stay clean.
+fast replies stay clean. When the user uses Telegram's reply-to-a-specific-message feature,
+`_quoted_context(msg)` pulls the quoted text (and whether it was the bot's own message) and
+`_handle_nl` prepends it as `[Replying to …]` to the user turn, so the model knows exactly
+what's being referenced. Wired for text, voice, and photo messages.
 
 The LLM **never writes to the DB directly.** It proposes tool calls; the deterministic
 `executor.py` validates and applies them, logging every write to the `events`
