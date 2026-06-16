@@ -99,9 +99,18 @@ async def _phrase_reminder(text: str) -> str:
         return f"⏰ Reminder: {text}"
 
 
+def _reminder_buttons(reminder_id: str) -> list[tuple[str, str]]:
+    """Done / snooze controls attached to a fired reminder, so the user taps instead of types."""
+    return [
+        ("✅ Done", f"rem:done:{reminder_id}"),
+        ("⏰ 1h", f"rem:snz:{reminder_id}:60"),
+        ("⏰ 3h", f"rem:snz:{reminder_id}:180"),
+    ]
+
+
 async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
     try:
-        await send(chat_id, await _phrase_reminder(text))
+        await send(chat_id, await _phrase_reminder(text), buttons=_reminder_buttons(reminder_id))
         db = get_db()
         now = datetime.now(timezone.utc)
         gap = await _followup_minutes(chat_id)
@@ -157,6 +166,7 @@ async def _reminder_followup_job(chat_id: int) -> None:
             await _phrase_reminder(
                 f"{r['text']} (still not marked done — tell me when it's handled)"
             ),
+            buttons=_reminder_buttons(str(r["_id"])),
         )
     except Exception:
         logger.exception("Follow-up nudge failed for reminder %s", r["_id"])
@@ -200,6 +210,41 @@ def schedule_reminder(
         replace_existing=True,
         misfire_grace_time=600,  # still fire if we were down up to 10 min past
     )
+
+
+async def _fire_recurring(chat_id: int, text: str) -> None:
+    """Fire a recurring reminder — just pings (it'll come round again), no follow-up nag."""
+    try:
+        await send(chat_id, await _phrase_reminder(text))
+    except Exception:
+        logger.exception("Failed to fire recurring reminder for chat %s", chat_id)
+
+
+def schedule_recurring_reminder(
+    rid: str, chat_id: int, text: str, hour: int, minute: int, day_of_week: str = "*"
+) -> None:
+    sched = get_scheduler()
+    sched.add_job(
+        _fire_recurring,
+        trigger=CronTrigger(hour=hour, minute=minute, day_of_week=day_of_week),
+        args=[chat_id, text],
+        id=f"recurring:{rid}",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
+async def load_recurring_reminders() -> None:
+    """Re-register every active recurring reminder after a restart."""
+    db = get_db()
+    rows = await db.recurring_reminders.find({"active": True}).to_list(None)
+    for r in rows:
+        schedule_recurring_reminder(
+            str(r["_id"]), r["chat_id"], r["text"],
+            r["hour"], r.get("minute", 0), r.get("day_of_week", "*"),
+        )
+    if rows:
+        logger.info("Re-loaded %d recurring reminder(s)", len(rows))
 
 
 async def _heartbeat_job(chat_id: int) -> None:

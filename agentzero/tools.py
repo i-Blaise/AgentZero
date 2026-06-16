@@ -157,8 +157,34 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "set_recurring_reminder",
+        "description": (
+            "Set a REPEATING reminder that fires on a schedule — for 'every weekday at 8', "
+            "'remind me every Monday to send invoices', 'daily at 9pm'. Unlike set_reminder "
+            "(a single ping that nags until confirmed), a recurring reminder just pings each "
+            "time it comes round. Resolve the time of day to a 24h hour/minute in local time."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to remind the user about."},
+                "hour": {"type": "integer", "description": "Hour of day, 0-23, local time."},
+                "minute": {"type": "integer", "description": "Minute of the hour, 0-59 (default 0)."},
+                "day_of_week": {
+                    "type": "string",
+                    "description": (
+                        "Which days, APScheduler cron style: '*' = every day, 'mon-fri' = "
+                        "weekdays, 'sat,sun' = weekends, or a comma list of lowercase 3-letter "
+                        "codes like 'mon,wed,fri'. Default '*'."
+                    ),
+                },
+            },
+            "required": ["text", "hour"],
+        },
+    },
+    {
         "name": "list_reminders",
-        "description": "List the user's upcoming (pending) reminders.",
+        "description": "List the user's upcoming one-off and recurring reminders.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {

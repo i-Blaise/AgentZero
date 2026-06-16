@@ -29,12 +29,21 @@ from agentzero.config import (
 )
 from agentzero.db import close as close_db
 from agentzero.db import create_indexes, get_db
-from agentzero.executor import execute_tool, get_status, undo_last
+from agentzero.executor import (
+    complete_reminder_by_id,
+    execute_tool,
+    get_status,
+    mark_done_by_id,
+    mute_task_nudge_by_id,
+    snooze_reminder_by_id,
+    undo_last,
+)
 from agentzero.llm import ToolCall, get_provider
 from agentzero.mcp_client import call_mcp_tool, get_mcp_tools, is_mcp_tool, load_mcp_tools
 from agentzero.prompts import THINKING_FILLERS, build_system_prompt
 from agentzero.scheduler import (
     load_pending_reminders,
+    load_recurring_reminders,
     schedule_evening_digest,
     schedule_heartbeat,
     schedule_job_digest,
@@ -61,6 +70,7 @@ async def lifespan(app: FastAPI):
     # Reminders + autonomy heartbeat
     start_scheduler()
     await load_pending_reminders()
+    await load_recurring_reminders()
     schedule_reminder_followups(ALLOWED_CHAT_ID)
     if AUTONOMY_ENABLED:
         schedule_heartbeat(ALLOWED_CHAT_ID)
@@ -148,6 +158,11 @@ async def health() -> dict:
 # ---------------------------------------------------------------------------
 
 async def process_update(update: Update) -> None:
+    # ---- inline button tap (callback query) --------------------------------
+    if update.callback_query:
+        await _handle_callback(update.callback_query)
+        return
+
     msg = update.message
     if not msg:
         return
@@ -303,6 +318,51 @@ async def _handle_voice(chat_id: int, msg) -> None:
 # Tools slow enough (they hit the internet) to warrant a "working on it" filler. Fast local
 # tools and quick replies don't get one — a filler there just looks odd.
 _FILLER_TOOLS = {"web_search", "web_fetch"}
+
+
+async def _handle_callback(cq) -> None:
+    """An inline button was tapped. callback_data is a compact 'kind:action:id[:arg]' string."""
+    bot = get_bot()
+    chat_id = cq.message.chat_id if cq.message else (cq.from_user.id if cq.from_user else 0)
+    if chat_id != ALLOWED_CHAT_ID:
+        try:
+            await bot.answer_callback_query(cq.id)
+        except Exception:
+            pass
+        return
+
+    parts = (cq.data or "").split(":")
+    toast = "Done."
+    try:
+        if parts[:2] == ["rem", "done"]:
+            toast = await complete_reminder_by_id(chat_id, parts[2])
+        elif parts[:2] == ["rem", "snz"]:
+            toast = await snooze_reminder_by_id(chat_id, parts[2], int(parts[3]))
+        elif parts[:2] == ["tsk", "done"]:
+            toast = await mark_done_by_id(chat_id, parts[2])
+        elif parts[:2] == ["tsk", "mute"]:
+            toast = await mute_task_nudge_by_id(chat_id, parts[2], int(parts[3]))
+        else:
+            toast = "Unknown action."
+    except Exception:
+        logger.exception("Callback handling failed for data %r", cq.data)
+        toast = "Couldn't do that — try typing it instead."
+
+    # Acknowledge (stops the button spinner / shows a toast).
+    try:
+        await bot.answer_callback_query(cq.id, text=toast[:200])
+    except Exception:
+        pass
+    # Annotate the original message and drop the keyboard so it can't be tapped twice.
+    try:
+        original = cq.message.text if cq.message and cq.message.text else ""
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=cq.message.message_id,
+            text=f"{original}\n— {toast}".strip(),
+        )
+    except Exception:
+        pass
 
 
 def _quoted_context(msg) -> str | None:

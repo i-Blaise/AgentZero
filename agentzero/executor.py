@@ -112,6 +112,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "update_task": _update_task,
         "snooze": _snooze,
         "set_reminder": _set_reminder,
+        "set_recurring_reminder": _set_recurring_reminder,
         "list_reminders": _list_reminders,
         "cancel_reminder": _cancel_reminder,
         "complete_reminder": _complete_reminder,
@@ -380,16 +381,30 @@ async def _list_reminders(chat_id: int, args: dict) -> str:
         .sort("fire_at", 1)
         .to_list(None)
     )
-    if not rows:
+    recurring = await db.recurring_reminders.find(
+        {"chat_id": chat_id, "active": True}
+    ).to_list(None)
+
+    if not rows and not recurring:
         return "No active reminders."
-    lines = ["Reminders:"]
-    for r in rows:
-        fire_at = r["fire_at"]
-        if fire_at.tzinfo is None:
-            fire_at = fire_at.replace(tzinfo=timezone.utc)
-        local = fire_at.astimezone(tz)
-        tag = " — awaiting your confirmation" if r.get("status") == "awaiting_ack" else ""
-        lines.append(f"  • {r['text']} — {local.strftime('%a %d %b, %H:%M')}{tag}")
+
+    lines: list[str] = []
+    if rows:
+        lines.append("Reminders:")
+        for r in rows:
+            fire_at = r["fire_at"]
+            if fire_at.tzinfo is None:
+                fire_at = fire_at.replace(tzinfo=timezone.utc)
+            local = fire_at.astimezone(tz)
+            tag = " — awaiting your confirmation" if r.get("status") == "awaiting_ack" else ""
+            lines.append(f"  • {r['text']} — {local.strftime('%a %d %b, %H:%M')}{tag}")
+    if recurring:
+        lines.append("Recurring:")
+        for r in recurring:
+            lines.append(
+                f"  • {r['text']} — {_humanise_dow(r.get('day_of_week', '*'))} "
+                f"at {r['hour']:02d}:{r.get('minute', 0):02d}"
+            )
     return "\n".join(lines)
 
 
@@ -425,27 +440,39 @@ async def _complete_reminder(chat_id: int, args: dict) -> str:
 async def _cancel_reminder(chat_id: int, args: dict) -> str:
     db = get_db()
     query = args["query"]
-    rows = await db.reminders.find(
+    one_offs = await db.reminders.find(
         {"chat_id": chat_id, "status": "pending"}
     ).to_list(None)
-    if not rows:
+    recurring = await db.recurring_reminders.find(
+        {"chat_id": chat_id, "active": True}
+    ).to_list(None)
+    if not one_offs and not recurring:
         return "No upcoming reminders to cancel."
 
-    scored = sorted(rows, key=lambda r: _sim(query, r["text"]), reverse=True)
-    best = scored[0]
+    # Pick the best match across both one-off and recurring reminders.
+    candidates = [("one_off", r) for r in one_offs] + [("recurring", r) for r in recurring]
+    kind, best = max(candidates, key=lambda c: _sim(query, c[1]["text"]))
     if _sim(query, best["text"]) < 0.3:
         return f'No reminder matching "{query}".'
 
-    await db.reminders.update_one(
-        {"_id": best["_id"]}, {"$set": {"status": "cancelled"}}
-    )
+    if kind == "recurring":
+        await db.recurring_reminders.update_one(
+            {"_id": best["_id"]}, {"$set": {"active": False}}
+        )
+        job_id = f"recurring:{best['_id']}"
+    else:
+        await db.reminders.update_one(
+            {"_id": best["_id"]}, {"$set": {"status": "cancelled"}}
+        )
+        job_id = f"reminder:{best['_id']}"
     try:
         from agentzero.scheduler import get_scheduler
 
-        get_scheduler().remove_job(f"reminder:{best['_id']}")
+        get_scheduler().remove_job(job_id)
     except Exception:
         pass
-    return f'Cancelled reminder: "{best["text"]}".'
+    label = "recurring reminder" if kind == "recurring" else "reminder"
+    return f'Cancelled {label}: "{best["text"]}".'
 
 
 async def _snooze_reminder(chat_id: int, args: dict) -> str:
@@ -509,6 +536,134 @@ async def _set_reminder_cadence(chat_id: int, args: dict) -> str:
     )
     pretty = f"{minutes} min" if minutes < 120 else f"{round(minutes / 60, 1)} h"
     return f"Done — I'll re-nudge about unfinished reminders every {pretty} now."
+
+
+# ---------------------------------------------------------------------------
+# Recurring reminders (cron-style: "every weekday at 8")
+# ---------------------------------------------------------------------------
+
+_DOW_HUMAN = {
+    "*": "every day",
+    "mon-fri": "every weekday",
+    "sat,sun": "on weekends",
+    "sat-sun": "on weekends",
+}
+
+
+def _humanise_dow(dow: str) -> str:
+    return _DOW_HUMAN.get(dow.lower().strip(), f"on {dow}")
+
+
+async def _set_recurring_reminder(chat_id: int, args: dict) -> str:
+    from agentzero.scheduler import schedule_recurring_reminder
+
+    text = (args.get("text") or "").strip()
+    if not text:
+        return "What should I remind you about?"
+    try:
+        hour = int(args["hour"])
+        minute = int(args.get("minute") or 0)
+    except (KeyError, ValueError, TypeError):
+        return "I need a time of day (hour, and optionally minute)."
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return "That time of day doesn't look right — give me an hour 0-23."
+    day_of_week = (args.get("day_of_week") or "*").lower().strip()
+
+    db = get_db()
+    result = await db.recurring_reminders.insert_one(
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "hour": hour,
+            "minute": minute,
+            "day_of_week": day_of_week,
+            "active": True,
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+    schedule_recurring_reminder(
+        str(result.inserted_id), chat_id, text, hour, minute, day_of_week
+    )
+    await _log_event(chat_id, "set_recurring_reminder", "recurring_reminders", result.inserted_id, None)
+    return f"Got it — I'll remind you to {text} {_humanise_dow(day_of_week)} at {hour:02d}:{minute:02d}."
+
+
+# ---------------------------------------------------------------------------
+# By-id reminder/task actions — used by inline buttons (no fuzzy matching needed)
+# ---------------------------------------------------------------------------
+
+def _oid(s: str) -> ObjectId | None:
+    try:
+        return ObjectId(s)
+    except Exception:
+        return None
+
+
+async def complete_reminder_by_id(chat_id: int, rid: str) -> str:
+    db = get_db()
+    oid = _oid(rid)
+    r = await db.reminders.find_one({"_id": oid, "chat_id": chat_id}) if oid else None
+    if not r or r.get("status") in ("done", "cancelled"):
+        return "Already handled."
+    prev = dict(r)
+    await db.reminders.update_one(
+        {"_id": oid}, {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc)}}
+    )
+    await _log_event(chat_id, "complete_reminder", "reminders", oid, prev)
+    try:
+        from agentzero.scheduler import get_scheduler
+
+        get_scheduler().remove_job(f"reminder:{rid}")
+    except Exception:
+        pass
+    return f'✅ Done: "{r["text"]}".'
+
+
+async def snooze_reminder_by_id(chat_id: int, rid: str, minutes: int) -> str:
+    from agentzero.scheduler import schedule_reminder
+
+    db = get_db()
+    oid = _oid(rid)
+    r = await db.reminders.find_one({"_id": oid, "chat_id": chat_id}) if oid else None
+    if not r or r.get("status") in ("done", "cancelled"):
+        return "That reminder's no longer active."
+    now = datetime.now(timezone.utc)
+    new_at = now + timedelta(minutes=minutes)
+    if r.get("status") == "awaiting_ack":
+        await db.reminders.update_one({"_id": oid}, {"$set": {"next_nudge_at": new_at}})
+    else:
+        await db.reminders.update_one({"_id": oid}, {"$set": {"fire_at": new_at}})
+        schedule_reminder(rid, chat_id, r["text"], new_at)
+    pretty = f"{minutes} min" if minutes < 120 else f"{round(minutes / 60, 1)} h"
+    return f'⏰ Snoozed "{r["text"]}" for {pretty}.'
+
+
+async def mark_done_by_id(chat_id: int, tid: str) -> str:
+    db = get_db()
+    oid = _oid(tid)
+    t = await db.tasks.find_one({"_id": oid}) if oid else None
+    if not t:
+        return "Can't find that task."
+    if t["status"] == "done":
+        return f'Already done: "{t["title"]}".'
+    prev = dict(t)
+    await db.tasks.update_one(
+        {"_id": oid}, {"$set": {"status": "done", "updated_at": datetime.utcnow()}}
+    )
+    await _log_event(chat_id, "mark_done", "tasks", oid, prev)
+    return f'✅ Done: "{t["title"]}".'
+
+
+async def mute_task_nudge_by_id(chat_id: int, tid: str, days: int = 2) -> str:
+    """Pause proactive nudges for a task without hiding it — push last_nudged_at forward."""
+    db = get_db()
+    oid = _oid(tid)
+    t = await db.tasks.find_one({"_id": oid}) if oid else None
+    if not t:
+        return "Can't find that task."
+    future = datetime.now(timezone.utc) + timedelta(days=days)
+    await db.tasks.update_one({"_id": oid}, {"$set": {"last_nudged_at": future}})
+    return f'🔕 I\'ll hold off on "{t["title"]}" for a couple of days.'
 
 
 # ---------------------------------------------------------------------------

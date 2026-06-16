@@ -235,12 +235,18 @@ async def run_heartbeat(chat_id: int, force: bool = False) -> str | None:
     if not reply or reply.upper().startswith(SILENT):
         return None
 
-    await send(chat_id, reply)
+    # Figure out which one task it nudged BEFORE sending, so we can attach Done / Not-now
+    # buttons for that task. Suppress ONLY that one, so the next heartbeat is free to raise
+    # the next-most-urgent — this is what makes the nudges trickle out one at a time.
+    nudged_ids = _suppress_after_nudge(reply, ranked)
+    buttons = None
+    if nudged_ids:
+        tid = str(nudged_ids[0])
+        buttons = [("✅ Done", f"tsk:done:{tid}"), ("🔕 Not now", f"tsk:mute:{tid}:2")]
+
+    await send(chat_id, reply, buttons=buttons)
     await _set_last_nudge(chat_id, now_utc)
 
-    # Suppress ONLY the one task it just nudged, so the next heartbeat is free to raise the
-    # next-most-urgent one — this is what makes the nudges trickle out one at a time.
-    nudged_ids = _suppress_after_nudge(reply, ranked)
     if nudged_ids:
         await db.tasks.update_many(
             {"_id": {"$in": nudged_ids}}, {"$set": {"last_nudged_at": now_utc}}

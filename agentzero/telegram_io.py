@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from agentzero.config import TELEGRAM_BOT_TOKEN
 
@@ -76,8 +76,26 @@ def _to_plain(text: str) -> str:
     return t.strip()
 
 
-async def send(chat_id: int, text: str) -> None:
+def _markup(buttons: list[tuple[str, str]] | None) -> InlineKeyboardMarkup | None:
+    """Build a single-row inline keyboard from (label, callback_data) pairs."""
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton(lbl, callback_data=data) for lbl, data in buttons]])
+
+
+async def send(
+    chat_id: int, text: str, buttons: list[tuple[str, str]] | None = None
+) -> None:
+    """Send a (sanitised, chunked) message. If `buttons` is given, an inline keyboard is
+    attached to the final chunk — taps arrive as callback queries handled in main.py."""
     bot = get_bot()
     text = _to_plain(text or "") or "​"  # zero-width space — Telegram rejects empty strings
-    for i in range(0, len(text), MAX_MSG):
-        await bot.send_message(chat_id=chat_id, text=text[i : i + MAX_MSG])
+    chunks = [text[i : i + MAX_MSG] for i in range(0, len(text), MAX_MSG)] or ["​"]
+    markup = _markup(buttons)
+    last = len(chunks) - 1
+    for idx, chunk in enumerate(chunks):
+        await bot.send_message(
+            chat_id=chat_id,
+            text=chunk,
+            reply_markup=markup if idx == last else None,
+        )

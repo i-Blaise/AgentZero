@@ -100,14 +100,15 @@ adapter translates them and manages its own native multi-turn message format ins
 
 ### Data model (MongoDB collections)
 `projects`, `tasks`, `events` (undo log), `chat_history` (last ~10 msgs/chat),
-`reminders`, `memory` (freeform facts), `system_state` (last proactive-nudge time),
+`reminders`, `recurring_reminders` (cron-style repeating pings), `memory` (freeform facts),
+`system_state` (last/next proactive-nudge time, nudge cadence), `seen_jobs`, `profile`,
 `disambiguation` (unused stub).
 
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
-`get_status`, `set_reminder`, `list_reminders`, `cancel_reminder`, `complete_reminder`,
-`snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`, `set_job_profile`,
-`find_jobs`, `web_search`, `web_fetch`. MCP tools added at runtime, `google__…`.
+`get_status`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
+`complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
+`set_job_profile`, `find_jobs`, `web_search`, `web_fetch`. MCP tools added at runtime, `google__…`.
 
 **Web search/fetch** (`web.py`): `web_search` picks a backend via `WEB_SEARCH_PROVIDER`
 (`auto` → Tavily key, else Brave key, else keyless DuckDuckGo). `web_fetch` needs no key
@@ -141,6 +142,21 @@ statuses: pending → awaiting_ack → done (or cancelled).
   `REMINDER_FOLLOWUP_MINUTES`. Both `_fire_reminder` and the follow-up loop use it.
 - **"Remind me later" → `snooze_reminder`:** pushes `next_nudge_at` (awaiting_ack) or re-schedules
   `fire_at` (pending) by N minutes (default 60); omit `query` to push all outstanding.
+- **Recurring reminders** (`set_recurring_reminder`): cron-style repeating pings ("every weekday
+  at 8") in the `recurring_reminders` collection, fired by `scheduler._fire_recurring` via a
+  `CronTrigger` (job id `recurring:<id>`), re-registered on startup by `load_recurring_reminders`.
+  These just ping each occurrence — NO awaiting_ack/follow-up nag. `list_reminders` shows them;
+  `cancel_reminder` matches across one-off + recurring and deactivates whichever fits best.
+
+**Inline buttons (callback queries):** fired reminders and follow-up nudges carry
+`✅ Done · ⏰ 1h · ⏰ 3h` buttons; proactive heartbeat nudges carry `✅ Done · 🔕 Not now` for the
+one task they raised. `telegram_io.send(..., buttons=[(label, callback_data)])` attaches a
+single-row keyboard to the final chunk. Taps arrive as `update.callback_query` → `main._handle_callback`,
+which parses compact `kind:action:id[:arg]` data (`rem:done`, `rem:snz:<id>:<min>`, `tsk:done`,
+`tsk:mute:<id>:<days>`), routes to the executor's by-id actions (`complete_reminder_by_id`,
+`snooze_reminder_by_id`, `mark_done_by_id`, `mute_task_nudge_by_id`), answers the callback (toast),
+and edits the message to strip the keyboard so it can't be tapped twice. `mute_task_nudge_by_id`
+pushes `last_nudged_at` forward (pauses nudges without hiding the task).
 
 **Proactive nudges (autonomy heartbeat):** the bot decides — on its own judgment — the single
 most-urgent open task and pings about THAT ONE only (`run_heartbeat` ranks via `_ranked`, the

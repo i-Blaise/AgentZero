@@ -203,10 +203,12 @@ async def test_no_db_writes_for_chitchat(mock_db):
     mock_prov.run_tool_loop = fake_loop
 
     update = MagicMock()
+    update.callback_query = None
     update.message.chat_id = CHAT_ID
     update.message.text = "Hey, how are you?"
     update.message.voice = None
     update.message.photo = None
+    update.message.reply_to_message = None
 
     with patch("agentzero.main.ALLOWED_CHAT_ID", CHAT_ID), \
          patch("agentzero.main.get_provider", return_value=mock_prov), \
