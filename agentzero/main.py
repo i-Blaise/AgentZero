@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request, Response
 from telegram import Update
+from telegram.constants import ChatAction
 
 from agentzero.config import (
     ALLOWED_CHAT_ID,
@@ -22,6 +24,7 @@ from agentzero.config import (
     MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
+    THINKING_FILLER_SECONDS,
     WEBHOOK_SECRET,
     WEBHOOK_URL,
 )
@@ -30,7 +33,7 @@ from agentzero.db import create_indexes, get_db
 from agentzero.executor import execute_tool, get_status, undo_last
 from agentzero.llm import ToolCall, get_provider
 from agentzero.mcp_client import call_mcp_tool, get_mcp_tools, is_mcp_tool, load_mcp_tools
-from agentzero.prompts import build_system_prompt
+from agentzero.prompts import THINKING_FILLERS, build_system_prompt
 from agentzero.scheduler import (
     load_pending_reminders,
     schedule_evening_digest,
@@ -298,10 +301,28 @@ async def _handle_voice(chat_id: int, msg) -> None:
     await _handle_nl(chat_id, text)
 
 
+async def _thinking_filler(chat_id: int) -> None:
+    """After a short delay, drop a witty 'still working' line — so a slow reply doesn't
+    feel like the bot went dark. Cancelled before it fires if the answer comes back fast."""
+    try:
+        await asyncio.sleep(THINKING_FILLER_SECONDS)
+        await send(chat_id, random.choice(THINKING_FILLERS))
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Thinking filler failed for chat %s", chat_id)
+
+
 async def _handle_nl(
     chat_id: int, text: str, image: bytes | None = None, image_mime: str = "image/jpeg"
 ) -> None:
     db = get_db()
+    # Immediate "typing…" so the user sees activity; a witty text filler follows only if
+    # the reply genuinely takes a while (THINKING_FILLER_SECONDS).
+    try:
+        await get_bot().send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
 
     # Load last 10 messages (oldest first)
     history_docs = (
@@ -330,6 +351,8 @@ async def _handle_nl(
 
     # Agentic loop: the model can call tools, see results, and call more (e.g. search
     # Gmail for ids, then fetch each body) before producing its final answer in voice.
+    # A witty filler fires if this runs long; it's cancelled the moment we have an answer.
+    filler = asyncio.create_task(_thinking_filler(chat_id))
     try:
         result = await llm.run_tool_loop(
             history, system, tools, _execute, image=image, image_mime=image_mime
@@ -340,6 +363,8 @@ async def _handle_nl(
     except Exception:
         logger.exception("Tool loop failed for chat %s", chat_id)
         reply = "Something went wrong handling that — give it another go in a moment."
+    finally:
+        filler.cancel()
 
     await db.chat_history.insert_one(
         {

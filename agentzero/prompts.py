@@ -20,6 +20,24 @@ PERSONALITY = """Voice & personality:
 - Confirmations and clarifying questions are clean and direct first; an occasional dry aside is fine, but the user must never be unclear on what happened or what you need."""
 
 
+# Dry, witty "hang on, I'm working" fillers — sent only when a reply is taking a while,
+# so the user knows the bot is thinking rather than dead. Keep them short and in voice.
+THINKING_FILLERS = [
+    "Zesting…",
+    "Beep boop, computing…",
+    "Hang tight — focusing thought energy.",
+    "Working on it. Spinning up the good brain cells.",
+    "One sec, consulting the oracle.",
+    "Digging through the internet so you don't have to…",
+    "Thinking. Loudly.",
+    "Crunching this — don't wander off.",
+    "On it. Summoning the relevant facts.",
+    "Give me a beat, doing actual work here.",
+    "Processing… pretend you hear dial-up noises.",
+    "Hold please — wrangling the details.",
+]
+
+
 async def build_system_prompt() -> str:
     db = get_db()
     now_local = datetime.now(ZoneInfo(TIMEZONE))

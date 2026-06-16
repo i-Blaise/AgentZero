@@ -56,6 +56,10 @@ EVENING_DIGEST_MINUTE: int = int(os.environ.get("EVENING_DIGEST_MINUTE", "30"))
 # Persistent reminders — a fired reminder keeps nudging until the user confirms it's done
 REMINDER_FOLLOWUP_MINUTES: int = int(os.environ.get("REMINDER_FOLLOWUP_MINUTES", "90"))
 
+# How long a reply may take before the bot drops a witty "still working" filler message.
+# Fast replies finish before this and stay clean; only genuinely slow ones get a filler.
+THINKING_FILLER_SECONDS: float = float(os.environ.get("THINKING_FILLER_SECONDS", "3"))
+
 # Job hunter — daily drop of new matching postings
 JOB_HUNT_ENABLED: bool = os.environ.get("JOB_HUNT_ENABLED", "true").lower() == "true"
 JOB_DIGEST_HOUR: int = int(os.environ.get("JOB_DIGEST_HOUR", "9"))    # 09:00
