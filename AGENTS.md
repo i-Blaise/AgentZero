@@ -65,10 +65,10 @@ final reply or hits `max_iters` (6). This is what lets it CHAIN calls (e.g. sear
 for ids → fetch each body → summarise). `_handle_nl` passes an `execute(name, args)`
 callback that routes local tools to `executor.py` and `google__*` tools to `mcp_client`.
 The model's final text IS the reply (narrated in voice); there's no separate narration pass.
-`_handle_nl` sends a `ChatAction.TYPING` immediately, and a witty "still working" filler
-(`prompts.THINKING_FILLERS`, picked at random) only if the loop runs longer than
-`THINKING_FILLER_SECONDS` — the filler task is cancelled the moment the answer is ready, so
-fast replies stay clean. When the user uses Telegram's reply-to-a-specific-message feature,
+`_handle_nl` sends a `ChatAction.TYPING` immediately, and a witty "working on it" filler
+(`prompts.THINKING_FILLERS`, picked at random) fires from the `_execute` callback the first
+time the model calls a slow internet tool (`_FILLER_TOOLS` = `web_search`/`web_fetch`) — at
+most once per turn. Fast local replies (and quick voice answers) get no filler. When the user uses Telegram's reply-to-a-specific-message feature,
 `_quoted_context(msg)` pulls the quoted text (and whether it was the bot's own message) and
 `_handle_nl` prepends it as `[Replying to …]` to the user turn, so the model knows exactly
 what's being referenced. Wired for text, voice, and photo messages.

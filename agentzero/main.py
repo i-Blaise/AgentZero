@@ -24,7 +24,6 @@ from agentzero.config import (
     MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
-    THINKING_FILLER_SECONDS,
     WEBHOOK_SECRET,
     WEBHOOK_URL,
 )
@@ -301,16 +300,9 @@ async def _handle_voice(chat_id: int, msg) -> None:
     await _handle_nl(chat_id, text, reply_to=_quoted_context(msg))
 
 
-async def _thinking_filler(chat_id: int) -> None:
-    """After a short delay, drop a witty 'still working' line — so a slow reply doesn't
-    feel like the bot went dark. Cancelled before it fires if the answer comes back fast."""
-    try:
-        await asyncio.sleep(THINKING_FILLER_SECONDS)
-        await send(chat_id, random.choice(THINKING_FILLERS))
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        logger.exception("Thinking filler failed for chat %s", chat_id)
+# Tools slow enough (they hit the internet) to warrant a "working on it" filler. Fast local
+# tools and quick replies don't get one — a filler there just looks odd.
+_FILLER_TOOLS = {"web_search", "web_fetch"}
 
 
 def _quoted_context(msg) -> str | None:
@@ -370,7 +362,18 @@ async def _handle_nl(
     llm = get_provider()
     tools = TOOLS + get_mcp_tools()
 
+    filler_sent = False
+
     async def _execute(name: str, args: dict) -> str:
+        # Drop a witty "working on it" line the first time the model reaches for the internet
+        # (web search/fetch) — those take a beat. Fast local tools stay quiet.
+        nonlocal filler_sent
+        if not filler_sent and name in _FILLER_TOOLS:
+            filler_sent = True
+            try:
+                await send(chat_id, random.choice(THINKING_FILLERS))
+            except Exception:
+                logger.exception("Thinking filler failed for chat %s", chat_id)
         # Local tools run on the executor; MCP tools route to their server.
         if is_mcp_tool(name):
             return await call_mcp_tool(name, args)
@@ -378,8 +381,6 @@ async def _handle_nl(
 
     # Agentic loop: the model can call tools, see results, and call more (e.g. search
     # Gmail for ids, then fetch each body) before producing its final answer in voice.
-    # A witty filler fires if this runs long; it's cancelled the moment we have an answer.
-    filler = asyncio.create_task(_thinking_filler(chat_id))
     try:
         result = await llm.run_tool_loop(
             history, system, tools, _execute, image=image, image_mime=image_mime
@@ -390,8 +391,6 @@ async def _handle_nl(
     except Exception:
         logger.exception("Tool loop failed for chat %s", chat_id)
         reply = "Something went wrong handling that — give it another go in a moment."
-    finally:
-        filler.cancel()
 
     await db.chat_history.insert_one(
         {
