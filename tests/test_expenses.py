@@ -80,6 +80,25 @@ async def test_receipt_logged_and_deduped(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_alert_logged_once(mock_db):
+    """Two separate alert emails for the same txn (same merchant+amount+day) log once."""
+    await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "receipt_cursor_yahoo": "100"})
+    emails = [
+        _email("101", "alert@calbank.net", "Transaction Alert", "POS purchase GHS 62.73"),
+        _email("102", "alert@calbank.net", "Transaction Alert", "POS purchase GHS 62.73"),
+    ]
+    rec = lambda uid: {"uid": uid, "category": "receipt", "merchant": "CalBank", "amount": "62.73",
+                       "currency": "GHS", "date": "2026-05-27", "expense_category": "shopping", "description": ""}
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[ACCT]), \
+         patch("agentzero.imap_mail.fetch_recent", new=AsyncMock(return_value=emails)), \
+         patch("agentzero.expenses.get_provider", return_value=_provider([rec("101"), rec("102")])):
+        logged = await expenses.scan_receipts(CHAT_ID)
+
+    assert len(logged) == 1
+    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID, "merchant": "CalBank"}) == 1
+
+
+@pytest.mark.asyncio
 async def test_non_receipt_ignored(mock_db):
     await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "receipt_cursor_yahoo": "100"})
     emails = [_email("101", "news@medium.com", "Your weekly digest")]

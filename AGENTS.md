@@ -82,10 +82,13 @@ via `GMAIL_IMAP_*` — Gmail here is IMAP-with-app-password, **separate from the
 because the MCP returns free-text blobs unsuitable for a deterministic scanner). `scheduler._receipt_scan_job`
 runs every `RECEIPT_SCAN_HOURS` and is **silent** (a ping per purchase would be spam) — it just
 LLM-classifies each mail as `receipt` (extract merchant/amount/currency/category/date) or `other`
-and inserts into `expenses`. **The classifier logs money OUT only**: for bank/mobile-money alerts
-it counts a debit/card-purchase/bill/subscription but excludes credits, deposits, money received,
-incoming/outgoing person-to-person transfers, refunds, reversals, declined txns, OTPs, and balance
-notices (this is the fix for bank alerts polluting the data). Per-mailbox UID cursors (`receipt_cursor_<source>`); first scan of a
+and inserts into `expenses`. **The classifier logs money paid to a third-party merchant only**: for bank/mobile-money alerts
+it counts a debit that PAYS a merchant (card/POS purchase, bill, subscription) but excludes credits,
+deposits, money received, P2P transfers, refunds, reversals, declined txns, OTPs, balance notices,
+AND the user moving their own money between their own accounts/wallets — bank↔mobile-money transfers,
+wallet top-ups / "pull" txns (e.g. "CalPay MTN Pull"), and ATM/cash withdrawals (these debit the
+account but aren't purchases — this was the real cause of the GHS 4,000 row). `_is_duplicate` also
+drops a same merchant+amount+currency same-day repeat (banks sometimes send two alerts per txn). Per-mailbox UID cursors (`receipt_cursor_<source>`); first scan of a
 mailbox sets a baseline (tracks forward). Dedup by `email_id` = `<source>:<uid>`. **Amounts are
 grouped per currency, never summed across** (GHS vs USD stay separate). `scheduler._expense_summary_job`
 sends a weekly summary (`EXPENSE_SUMMARY_DOW`/`HOUR`). Tools: `list_expenses`, `expense_summary`,

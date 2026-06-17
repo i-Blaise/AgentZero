@@ -104,13 +104,18 @@ async def _classify(emails: list[dict]) -> list[dict]:
         f"(YYYY-MM-DD if present), an expense_category from {_CATEGORIES} (infer it from the "
         "merchant; use 'other' only when genuinely unclear), and a short description.\n"
         "- \"other\": everything that is NOT money the user spent.\n\n"
-        "CRITICAL — bank / mobile-money transaction alerts (e.g. from a bank like CalBank): mark "
-        "\"receipt\" ONLY for a DEBIT — money LEAVING the user's account to pay for something (card "
+        "CRITICAL — bank / mobile-money transaction alerts (e.g. from a bank like CalBank): an "
+        "expense is money paid to a THIRD-PARTY merchant for a good, service, or bill — NOT money "
+        "the user simply moved around. Mark \"receipt\" ONLY for a debit that pays a merchant (card "
         "purchase, POS payment, bill, subscription). You MUST mark \"other\" for ALL of: credits, "
         "deposits, money RECEIVED, incoming transfers, salary, refunds, reversals, declined/failed "
-        "transactions, OTP/verification codes, low-balance or balance/mini-statement notices, and "
-        "person-to-person money the user SENT (a transfer to someone is not a purchase receipt). If "
-        "the direction (in vs out) is unclear, choose \"other\".\n\n"
+        "transactions, OTP/verification codes, low-balance or balance/mini-statement notices, "
+        "person-to-person money the user SENT, AND — importantly — the user moving their OWN money "
+        "between their OWN accounts or wallets: bank↔mobile-money transfers, mobile-money funding / "
+        "top-ups / 'pull' transactions (e.g. a 'CalPay MTN Pull', wallet load/top-up), and ATM or "
+        "cash withdrawals. These are NOT purchases even though they debit the account. If the debit "
+        "is a transfer/top-up/withdrawal rather than a payment to a merchant, or the direction is "
+        "unclear, choose \"other\".\n\n"
         "Be conservative: only \"receipt\" when real money was genuinely spent on a purchase/bill AND "
         "you can find an amount. Return ONLY JSON, no prose: "
         '{"results":[{"uid":"<uid>","category":"receipt|other","merchant":"","amount":"",'
@@ -186,14 +191,18 @@ async def _log_receipts(
             continue
         src_email = by_uid.get(uid, {})
         spent_at = _resolve_date(r.get("date"), src_email.get("date"))
+        merchant = (r.get("merchant") or "Unknown").strip()
+        currency = (r.get("currency") or DEFAULT_CURRENCY).strip().upper()[:3]
+        if await _is_duplicate(chat_id, merchant, amount, currency, spent_at):
+            continue  # same merchant+amount+currency same day = likely a duplicate alert
         cat = (r.get("expense_category") or "other").lower()
         doc = await _log_expense(
             chat_id,
             {
                 "chat_id": chat_id,
-                "merchant": (r.get("merchant") or "Unknown").strip(),
+                "merchant": merchant,
                 "amount": amount,
-                "currency": (r.get("currency") or DEFAULT_CURRENCY).strip().upper()[:3],
+                "currency": currency,
                 "category": cat if cat in _CATEGORIES else "other",
                 "description": (r.get("description") or "").strip(),
                 "spent_at": spent_at,
@@ -204,6 +213,27 @@ async def _log_receipts(
         )
         logged.append(doc)
     return logged
+
+
+async def _is_duplicate(
+    chat_id: int, merchant: str, amount: float, currency: str, spent_at: datetime
+) -> bool:
+    """A same merchant+amount+currency on the same calendar day is almost certainly a duplicate
+    alert for one transaction (banks sometimes send two). Trade-off: two genuine identical
+    same-day purchases would be merged — rare, and the user can add the second manually."""
+    db = get_db()
+    same = await db.expenses.find(
+        {"chat_id": chat_id, "amount": amount, "currency": currency}
+    ).to_list(None)
+    for ex in same:
+        exd = _aware(ex.get("spent_at"))
+        if (
+            ex.get("merchant", "").strip().lower() == merchant.lower()
+            and exd
+            and exd.date() == spent_at.date()
+        ):
+            return True
+    return False
 
 
 def _chunks(seq: list, n: int):
