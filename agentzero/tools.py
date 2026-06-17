@@ -455,6 +455,23 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "delete_expense",
+        "description": (
+            "Remove a logged expense that's wrong or not actually a purchase — e.g. a bank "
+            "credit/transfer the scanner mistook for spending ('that 4000 cedi CalBank entry "
+            "isn't an expense, remove it'). Fuzzy-matches by merchant/description; if several "
+            "match, also pass the amount to pick the right one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Merchant or description of the expense to remove."},
+                "amount": {"type": "number", "description": "Optional exact amount, to disambiguate."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "check_receipts",
         "description": (
             "Scan the mailboxes NOW for payment receipts and log them, reporting what was found. "

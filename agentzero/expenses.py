@@ -17,6 +17,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 
 from agentzero.config import DEFAULT_CURRENCY, EXPENSE_TRACKING_ENABLED
 from agentzero.db import get_db
@@ -34,6 +35,10 @@ def _aware(dt):
     if dt is None:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _sim(a: str, b: str) -> float:
+    return SequenceMatcher(None, (a or "").lower(), (b or "").lower()).ratio()
 
 
 def _parse_amount(raw) -> float | None:
@@ -90,17 +95,24 @@ async def _classify(emails: list[dict]) -> list[dict]:
         for e in emails
     )
     system = (
-        "You extract PAYMENT RECEIPTS from emails for an expense tracker. For EACH email, "
-        "category is:\n"
-        "- \"receipt\": a confirmation that the user PAID or was CHARGED money — purchase/order "
-        "receipt, subscription renewal charge, bill payment, ride/food-delivery receipt, an "
-        "invoice marked paid. Extract merchant, amount (number only), currency (3-letter ISO; "
-        f"infer from the symbol, default {DEFAULT_CURRENCY}), date (YYYY-MM-DD if present), an "
-        f"expense_category from {_CATEGORIES}, and a short description.\n"
-        "- \"other\": anything that isn't an actual payment — marketing, shipping notices with no "
-        "charge, balance alerts, statements, OTPs, personal mail, etc.\n\n"
-        "Be conservative: only \"receipt\" when real money was actually spent, and only if you can "
-        "find an amount. Return ONLY JSON, no prose: "
+        "You extract PAYMENT RECEIPTS (money the user actually SPENT) from emails for an expense "
+        "tracker. For EACH email set category:\n"
+        "- \"receipt\": the user paid money OUT for a good, service, bill, or subscription — a "
+        "purchase/order receipt, card (POS) purchase, ride/food-delivery receipt, bill or "
+        "subscription payment, an invoice they paid. Extract merchant, amount (number only), "
+        f"currency (3-letter ISO; infer from the symbol, default {DEFAULT_CURRENCY}), date "
+        f"(YYYY-MM-DD if present), an expense_category from {_CATEGORIES} (infer it from the "
+        "merchant; use 'other' only when genuinely unclear), and a short description.\n"
+        "- \"other\": everything that is NOT money the user spent.\n\n"
+        "CRITICAL — bank / mobile-money transaction alerts (e.g. from a bank like CalBank): mark "
+        "\"receipt\" ONLY for a DEBIT — money LEAVING the user's account to pay for something (card "
+        "purchase, POS payment, bill, subscription). You MUST mark \"other\" for ALL of: credits, "
+        "deposits, money RECEIVED, incoming transfers, salary, refunds, reversals, declined/failed "
+        "transactions, OTP/verification codes, low-balance or balance/mini-statement notices, and "
+        "person-to-person money the user SENT (a transfer to someone is not a purchase receipt). If "
+        "the direction (in vs out) is unclear, choose \"other\".\n\n"
+        "Be conservative: only \"receipt\" when real money was genuinely spent on a purchase/bill AND "
+        "you can find an amount. Return ONLY JSON, no prose: "
         '{"results":[{"uid":"<uid>","category":"receipt|other","merchant":"","amount":"",'
         '"currency":"","date":"","expense_category":"","description":""}]} — one entry per email.'
     )
@@ -317,6 +329,53 @@ async def add_expense(
         "created_at": datetime.now(timezone.utc),
     }
     return await _log_expense(chat_id, doc)
+
+
+async def delete_expense(chat_id: int, query: str, amount: float | None = None) -> str:
+    """Remove a logged expense the user says is wrong / not really an expense. Fuzzy-matches
+    by merchant or description; `amount` disambiguates when several merchants match."""
+    db = get_db()
+    rows = await db.expenses.find({"chat_id": chat_id}).to_list(None)
+    if not rows:
+        return "No expenses logged to delete."
+
+    def score(r: dict) -> float:
+        s = _sim(query, r.get("merchant", ""))
+        if r.get("description"):
+            s = max(s, _sim(query, r["description"]))
+        return s
+
+    candidates = rows
+    if amount is not None:
+        amt_matches = [r for r in rows if abs(float(r.get("amount", 0)) - amount) < 0.01]
+        if amt_matches:
+            candidates = amt_matches
+
+    scored = sorted(candidates, key=score, reverse=True)
+    best = scored[0]
+    if amount is None and score(best) < 0.4:
+        return f'No expense matching "{query}".'
+
+    strong = [r for r in scored if score(r) >= 0.6]
+    if amount is None and len(strong) > 1:
+        listed = "\n".join(
+            f"  • {r['currency']} {float(r['amount']):,.2f} · {r['merchant']}"
+            + (f" ({_aware(r['spent_at']).strftime('%d %b')})" if _aware(r.get('spent_at')) else "")
+            for r in strong[:5]
+        )
+        return f'Several expenses match "{query}" — tell me the amount too:\n{listed}'
+
+    await db.expenses.delete_one({"_id": best["_id"]})
+    return f"🗑️ Removed: {best['currency']} {float(best['amount']):,.2f} · {best['merchant']}."
+
+
+async def purge_scanned_expenses(chat_id: int) -> int:
+    """Delete email-sourced expenses (keep manual entries) — for a clean re-scan. Returns count."""
+    db = get_db()
+    res = await db.expenses.delete_many(
+        {"chat_id": chat_id, "source": {"$in": ["yahoo", "gmail"]}}
+    )
+    return res.deleted_count
 
 
 # ---------------------------------------------------------------------------

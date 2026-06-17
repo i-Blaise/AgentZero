@@ -82,15 +82,21 @@ via `GMAIL_IMAP_*` — Gmail here is IMAP-with-app-password, **separate from the
 because the MCP returns free-text blobs unsuitable for a deterministic scanner). `scheduler._receipt_scan_job`
 runs every `RECEIPT_SCAN_HOURS` and is **silent** (a ping per purchase would be spam) — it just
 LLM-classifies each mail as `receipt` (extract merchant/amount/currency/category/date) or `other`
-and inserts into `expenses`. Per-mailbox UID cursors (`receipt_cursor_<source>`); first scan of a
+and inserts into `expenses`. **The classifier logs money OUT only**: for bank/mobile-money alerts
+it counts a debit/card-purchase/bill/subscription but excludes credits, deposits, money received,
+incoming/outgoing person-to-person transfers, refunds, reversals, declined txns, OTPs, and balance
+notices (this is the fix for bank alerts polluting the data). Per-mailbox UID cursors (`receipt_cursor_<source>`); first scan of a
 mailbox sets a baseline (tracks forward). Dedup by `email_id` = `<source>:<uid>`. **Amounts are
 grouped per currency, never summed across** (GHS vs USD stay separate). `scheduler._expense_summary_job`
 sends a weekly summary (`EXPENSE_SUMMARY_DOW`/`HOUR`). Tools: `list_expenses`, `expense_summary`,
 `add_expense` (manual), `check_receipts` (force scan now; pass `days=N` for a historical
 backfill — `expenses.backfill_receipts` pulls the last N days via `imap_mail.fetch_since`,
 classifies in batches, logs deduped by `email_id`, and does NOT move the forward cursor).
-`/expenses` shows the month summary.
-Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual add works without one.
+`delete_expense` removes a wrong row (fuzzy by merchant/description, `amount` disambiguates — for
+purging a misread bank credit/transfer). `expenses.purge_scanned_expenses(chat_id)` deletes
+email-sourced rows but keeps manual ones (used for a clean re-backfill). `/expenses` shows the
+month summary. Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual
+add/delete work without one. The dashboard API stays read-only (no DELETE) — deletions are chat-only.
 
 ## Dashboard API (`api.py`)
 

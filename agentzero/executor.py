@@ -133,6 +133,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "list_expenses": _list_expenses,
         "expense_summary": _expense_summary,
         "add_expense": _add_expense,
+        "delete_expense": _delete_expense,
         "check_receipts": _check_receipts,
     }
     handler = handlers.get(tc.name)
@@ -886,6 +887,16 @@ async def _add_expense(chat_id: int, args: dict) -> str:
         args.get("currency", ""), args.get("category", "other"), args.get("description", ""),
     )
     return f"💸 Logged: {doc['currency']} {doc['amount']:,.2f} at {doc['merchant']} [{doc['category']}]."
+
+
+async def _delete_expense(chat_id: int, args: dict) -> str:
+    from agentzero.expenses import _parse_amount, delete_expense
+
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "Which expense should I remove — name the merchant?"
+    amount = _parse_amount(args["amount"]) if args.get("amount") is not None else None
+    return await delete_expense(chat_id, query, amount)
 
 
 async def _check_receipts(chat_id: int, args: dict) -> str:

@@ -146,6 +146,61 @@ async def test_check_receipts_days_triggers_backfill(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_delete_expense_by_merchant(mock_db):
+    await execute_tool(CHAT_ID, _tc("add_expense", merchant="CalBank", amount=4000, currency="GHS"))
+    await execute_tool(CHAT_ID, _tc("add_expense", merchant="Uber", amount=28, currency="GHS"))
+
+    out = await execute_tool(CHAT_ID, _tc("delete_expense", query="CalBank"))
+    assert "removed" in out.lower()
+    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID, "merchant": "CalBank"}) == 0
+    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID, "merchant": "Uber"}) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_expense_disambiguates_by_amount(mock_db):
+    await execute_tool(CHAT_ID, _tc("add_expense", merchant="CalBank", amount=4000, currency="GHS"))
+    await execute_tool(CHAT_ID, _tc("add_expense", merchant="CalBank", amount=5, currency="GHS"))
+
+    # ambiguous → asks for the amount, deletes nothing
+    out = await execute_tool(CHAT_ID, _tc("delete_expense", query="CalBank"))
+    assert "amount" in out.lower()
+    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID}) == 2
+
+    # with amount → removes the right one
+    out2 = await execute_tool(CHAT_ID, _tc("delete_expense", query="CalBank", amount=4000))
+    assert "removed" in out2.lower()
+    remaining = await mock_db.expenses.find({"chat_id": CHAT_ID}).to_list(None)
+    assert len(remaining) == 1 and remaining[0]["amount"] == 5
+
+
+@pytest.mark.asyncio
+async def test_delete_expense_not_found(mock_db):
+    await execute_tool(CHAT_ID, _tc("add_expense", merchant="Uber", amount=28))
+    out = await execute_tool(CHAT_ID, _tc("delete_expense", query="Nonexistent Merchant XYZ"))
+    assert "no expense matching" in out.lower()
+    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID}) == 1
+
+
+@pytest.mark.asyncio
+async def test_purge_scanned_keeps_manual(mock_db):
+    from agentzero.expenses import purge_scanned_expenses
+
+    now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+    await mock_db.expenses.insert_many([
+        {"chat_id": CHAT_ID, "merchant": "Uber", "amount": 28, "currency": "GHS",
+         "category": "transport", "spent_at": now, "source": "yahoo", "email_id": "yahoo:1"},
+        {"chat_id": CHAT_ID, "merchant": "Spotify", "amount": 10, "currency": "USD",
+         "category": "subscription", "spent_at": now, "source": "gmail", "email_id": "gmail:2"},
+        {"chat_id": CHAT_ID, "merchant": "Lunch", "amount": 50, "currency": "GHS",
+         "category": "food", "spent_at": now, "source": "manual", "email_id": ""},
+    ])
+    deleted = await purge_scanned_expenses(CHAT_ID)
+    assert deleted == 2
+    rows = await mock_db.expenses.find({"chat_id": CHAT_ID}).to_list(None)
+    assert len(rows) == 1 and rows[0]["source"] == "manual"
+
+
+@pytest.mark.asyncio
 async def test_check_receipts_tool_no_double_send(mock_db):
     with patch("agentzero.imap_mail.mail_accounts", return_value=[]), \
          patch("agentzero.telegram_io.send", new_callable=AsyncMock) as mock_send:
