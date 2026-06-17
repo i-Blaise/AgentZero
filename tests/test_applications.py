@@ -101,6 +101,56 @@ async def test_reply_creates_tracking_when_no_confirmation(mock_db):
     assert app is not None and app["status"] == "interview"
 
 
+SENT_ACCT = {"source": "yahoo", "host": "h", "user": "u", "password": "p", "sent_folder": "Sent"}
+
+
+@pytest.mark.asyncio
+async def test_sent_first_scan_sets_baseline(mock_db):
+    emails = [_email("50", "me@y.com", "hi"), _email("51", "me@y.com", "yo")]
+    prov = _provider([])
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[SENT_ACCT]), \
+         patch("agentzero.imap_mail.fetch_recent", new=AsyncMock(return_value=emails)), \
+         patch("agentzero.applications.get_provider", return_value=prov):
+        new = await applications.scan_sent(CHAT_ID)
+
+    assert new == []
+    prov.chat.assert_not_called()  # no classification on baseline
+    st = await mock_db.system_state.find_one({"chat_id": CHAT_ID})
+    assert st["sent_app_cursor_yahoo"] == "51"
+
+
+@pytest.mark.asyncio
+async def test_sent_application_starts_tracking(mock_db):
+    await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "sent_app_cursor_yahoo": "100"})
+    emails = [_email("101", "me@y.com", "Application: Backend Engineer", "Please find my CV attached")]
+    prov = _provider([{"uid": "101", "category": "application",
+                       "company": "Acme", "role": "Backend Engineer"}])
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[SENT_ACCT]), \
+         patch("agentzero.imap_mail.fetch_recent", new=AsyncMock(return_value=emails)), \
+         patch("agentzero.applications.get_provider", return_value=prov):
+        new = await applications.scan_sent(CHAT_ID)
+
+    assert len(new) == 1
+    app = await mock_db.applications.find_one({"chat_id": CHAT_ID, "company": "Acme"})
+    assert app["status"] == "applied"
+    assert app["role"] == "Backend Engineer"
+    assert app["source"] == "yahoo:sent"
+
+
+@pytest.mark.asyncio
+async def test_sent_non_application_ignored(mock_db):
+    await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "sent_app_cursor_yahoo": "100"})
+    emails = [_email("101", "me@y.com", "lunch plans")]
+    prov = _provider([{"uid": "101", "category": "other", "company": "", "role": ""}])
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[SENT_ACCT]), \
+         patch("agentzero.imap_mail.fetch_recent", new=AsyncMock(return_value=emails)), \
+         patch("agentzero.applications.get_provider", return_value=prov):
+        new = await applications.scan_sent(CHAT_ID)
+
+    assert new == []
+    assert await mock_db.applications.count_documents({"chat_id": CHAT_ID}) == 0
+
+
 @pytest.mark.asyncio
 async def test_stale_followup_flagged_once(mock_db):
     await mock_db.applications.insert_one(

@@ -37,6 +37,7 @@ def mail_accounts() -> list[dict]:
             "enabled": YAHOO_MAIL_ENABLED,
             "user": YAHOO_MAIL_USER,
             "password": YAHOO_MAIL_APP_PASSWORD,
+            "sent_folder": "Sent",
         },
         {
             "source": "gmail",
@@ -44,6 +45,7 @@ def mail_accounts() -> list[dict]:
             "enabled": GMAIL_IMAP_ENABLED,
             "user": GMAIL_IMAP_USER,
             "password": GMAIL_IMAP_APP_PASSWORD,
+            "sent_folder": "[Gmail]/Sent Mail",
         },
     ]
     return [a for a in spec if a["enabled"] and a["user"] and a["password"]]
@@ -66,6 +68,7 @@ def _fetch_uid_list(M: imaplib.IMAP4_SSL, uids: list) -> list[dict]:
             {
                 "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
                 "from": _decode(msg.get("From")),
+                "to": _decode(msg.get("To")),
                 "subject": _decode(msg.get("Subject")) or "(no subject)",
                 "date": date,
                 "snippet": _extract_body(msg)[:700],

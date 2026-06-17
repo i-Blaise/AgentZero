@@ -63,6 +63,19 @@ async def _set_last_scan_uid(chat_id: int, uid: str) -> None:
     )
 
 
+async def _get_sent_cursor(chat_id: int, source: str) -> str | None:
+    db = get_db()
+    doc = await db.system_state.find_one({"chat_id": chat_id})
+    return (doc or {}).get(f"sent_app_cursor_{source}")
+
+
+async def _set_sent_cursor(chat_id: int, source: str, uid: str) -> None:
+    db = get_db()
+    await db.system_state.update_one(
+        {"chat_id": chat_id}, {"$set": {f"sent_app_cursor_{source}": str(uid)}}, upsert=True
+    )
+
+
 # ---------------------------------------------------------------------------
 # LLM classification
 # ---------------------------------------------------------------------------
@@ -122,6 +135,35 @@ async def _classify(emails: list[dict], apps: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
+
+async def _classify_sent(emails: list[dict]) -> list[dict]:
+    """Classify emails the USER SENT — find the ones that are job applications."""
+    listing = "\n".join(
+        f'[uid {e["uid"]}] To: {e.get("to","")} | Subject: {e["subject"]}\n  {e.get("snippet","")[:400]}'
+        for e in emails
+    )
+    system = (
+        "These are emails the USER SENT. Find JOB APPLICATIONS — emails where the user is applying "
+        "for a job: sending a CV/résumé or cover letter, expressing interest in a specific role, "
+        "responding to a job posting, or emailing a recruiter/company to apply. For EACH email set "
+        "category:\n"
+        "- \"application\": the user is applying for a job. Extract the company (from the recipient "
+        "or the body) and the role/title if stated.\n"
+        "- \"other\": anything else the user sent — normal work email, personal mail, replies to "
+        "friends, newsletters they forwarded, etc.\n\n"
+        "Only mark \"application\" when it's genuinely the user applying for a job. Return ONLY JSON, "
+        'no prose: {"results":[{"uid":"<uid>","category":"application|other","company":"","role":""}]}'
+        " — one entry per email, reusing the given uids."
+    )
+    try:
+        raw = await get_provider().chat([{"role": "user", "content": listing}], system)
+    except Exception:
+        logger.exception("Sent-application classifier LLM call failed")
+        return []
+    data = _parse_json(raw)
+    results = data.get("results") if isinstance(data, dict) else None
+    return results if isinstance(results, list) else []
+
 
 async def _load_apps(chat_id: int) -> list[dict]:
     db = get_db()
@@ -240,6 +282,43 @@ async def scan_inbox(chat_id: int) -> dict:
     return {"new": new_docs, "updates": updates}
 
 
+async def scan_sent(chat_id: int) -> list[dict]:
+    """Scan the SENT folder of every configured mailbox for outgoing job applications
+    (applying by email) and start tracking them. Returns the newly-tracked application docs.
+    Per-mailbox cursor; first scan of a mailbox sets a baseline (tracks forward)."""
+    from agentzero import imap_mail
+
+    if not JOB_TRACKING_ENABLED:
+        return []
+    new_tracked: list[dict] = []
+    for acc in imap_mail.mail_accounts():
+        source = acc["source"]
+        folder = acc.get("sent_folder", "Sent")
+        cursor = await _get_sent_cursor(chat_id, source)
+        emails = await imap_mail.fetch_recent(acc, folder, 25, cursor)
+        if not emails:
+            continue
+        max_uid = str(max(int(e["uid"]) for e in emails))
+        if cursor is None:  # first run for this mailbox — baseline forward only
+            await _set_sent_cursor(chat_id, source, max_uid)
+            logger.info("Sent-application baseline for %s set at uid %s", source, max_uid)
+            continue
+        for r in await _classify_sent(emails):
+            if not isinstance(r, dict) or (r.get("category") or "").lower() != "application":
+                continue
+            company = (r.get("company") or "").strip()
+            if not company:
+                continue
+            doc, created = await upsert_application(
+                chat_id, company, (r.get("role") or "").strip(), "applied",
+                source=f"{source}:sent", uid=str(r.get("uid") or ""),
+            )
+            if created:
+                new_tracked.append(doc)
+        await _set_sent_cursor(chat_id, source, max_uid)
+    return new_tracked
+
+
 # ---------------------------------------------------------------------------
 # Proactive update message
 # ---------------------------------------------------------------------------
@@ -264,10 +343,14 @@ async def gather_application_update(chat_id: int) -> str | None:
     """Scan + build the update text (new tracked apps / status changes / stale follow-ups),
     WITHOUT sending. Returns the message text, or None if nothing's worth saying."""
     changes = await scan_inbox(chat_id)
+    sent_new = await scan_sent(chat_id)
     lines: list[str] = []
     for d in changes["new"]:
         role = f" — {d['role']}" if d.get("role") else ""
         lines.append(f"📋 Now tracking: {d['company']}{role}")
+    for d in sent_new:
+        role = f" — {d['role']}" if d.get("role") else ""
+        lines.append(f"📋 Now tracking (you applied by email): {d['company']}{role}")
     for d, status, created in changes["updates"]:
         role = f" ({d['role']})" if d.get("role") else ""
         label = _STATUS_LABEL.get(status, status)

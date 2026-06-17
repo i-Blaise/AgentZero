@@ -66,7 +66,15 @@ company/role match, no dupes). An **update for a company with no existing record
 from the reply** (e.g. an interview invite with no prior confirmation) — flagged with the
 `created` bit so the notification reads "Now tracking … (their reply came in first)". The
 classifier is told to categorise by content, not by whether the company is already tracked.
-**First scan only sets a baseline UID — it tracks forward, never trawls history.** `send_application_update` proactively reports new tracked apps, status changes,
+**First scan only sets a baseline UID — it tracks forward, never trawls history.**
+
+**Sent-folder scanning** (`scan_sent`, also run by `gather_application_update`): scans the SENT
+folder of every configured mailbox (multi-account via `imap_mail`; Yahoo `Sent`, Gmail
+`[Gmail]/Sent Mail`) and LLM-classifies outgoing mail as `application` (the user applied for a job
+by email → start tracking at `applied`, source `<src>:sent`) or `other`. Per-mailbox cursor
+`sent_app_cursor_<source>`, baseline-forward on first run. NOTE: the INBOX reply-scan (`scan_inbox`)
+is still **Yahoo-only**, so replies to applications the user sent from Gmail won't auto-update yet —
+extend `scan_inbox` to `imap_mail` multi-account if that's needed. `send_application_update` proactively reports new tracked apps, status changes,
 and **stale follow-ups** (status `applied` past `APPLICATION_STALE_DAYS` → "gone quiet, follow
 up?", flagged once via `stale_notified`). Tools: `list_applications`, `track_application`,
 `update_application`, `check_job_replies` (force a scan now — uses `gather_application_update`,
