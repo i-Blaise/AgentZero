@@ -126,6 +126,14 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "web_fetch": _web_fetch,
         "yahoo_search": _yahoo_search,
         "yahoo_read": _yahoo_read,
+        "list_applications": _list_applications,
+        "track_application": _track_application,
+        "update_application": _update_application,
+        "check_job_replies": _check_job_replies,
+        "list_expenses": _list_expenses,
+        "expense_summary": _expense_summary,
+        "add_expense": _add_expense,
+        "check_receipts": _check_receipts,
     }
     handler = handlers.get(tc.name)
     if handler is None:
@@ -789,3 +797,105 @@ async def _yahoo_read(chat_id: int, args: dict) -> str:
     from agentzero.yahoo_mail import yahoo_read
 
     return await yahoo_read(args.get("uid", ""), args.get("folder", "INBOX"))
+
+
+# ---------------------------------------------------------------------------
+# Job application tracking
+# ---------------------------------------------------------------------------
+
+async def _list_applications(chat_id: int, args: dict) -> str:
+    from agentzero.applications import _load_apps, format_applications
+
+    apps = await _load_apps(chat_id)
+    return format_applications(apps, (args.get("status") or "").strip() or None)
+
+
+async def _track_application(chat_id: int, args: dict) -> str:
+    from agentzero.applications import upsert_application
+
+    company = (args.get("company") or "").strip()
+    if not company:
+        return "Which company did you apply to?"
+    role = (args.get("role") or "").strip()
+    status = (args.get("status") or "applied").strip()
+    doc, created = await upsert_application(chat_id, company, role, status, source="manual")
+    role_str = f" — {role}" if role else ""
+    if created:
+        return f"📋 Tracking your application to {company}{role_str}."
+    return f"Updated {company}{role_str} (already tracked)."
+
+
+async def _update_application(chat_id: int, args: dict) -> str:
+    from agentzero.applications import _STATUS_LABEL, _find_app
+
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "Which application — name the company?"
+    app = await _find_app(chat_id, query, args.get("role", ""))
+    if not app:
+        return f'No tracked application matching "{query}".'
+    status = (args.get("status") or "").strip().lower()
+    updates: dict = {"last_update_at": datetime.now(timezone.utc)}
+    if status:
+        if status not in _STATUS_LABEL:
+            return f"Status must be one of: {', '.join(_STATUS_LABEL)}."
+        updates["status"] = status
+    if notes := (args.get("notes") or "").strip():
+        updates["notes"] = notes
+    db = get_db()
+    await db.applications.update_one({"_id": app["_id"]}, {"$set": updates})
+    label = _STATUS_LABEL.get(status, status) if status else "updated"
+    return f'{app["company"]}: {label}.'
+
+
+async def _check_job_replies(chat_id: int, args: dict) -> str:
+    """Force an inbox scan now and report what changed (or that nothing did)."""
+    from agentzero.applications import gather_application_update
+
+    msg = await gather_application_update(chat_id)
+    return msg or "Checked your inbox — no new application confirmations or replies."
+
+
+# ---------------------------------------------------------------------------
+# Expense tracking
+# ---------------------------------------------------------------------------
+
+async def _list_expenses(chat_id: int, args: dict) -> str:
+    from agentzero.expenses import list_expenses
+
+    period = (args.get("period") or "month").strip().lower()
+    category = (args.get("category") or "").strip().lower() or None
+    return await list_expenses(chat_id, period, category)
+
+
+async def _expense_summary(chat_id: int, args: dict) -> str:
+    from agentzero.expenses import expense_summary
+
+    return await expense_summary(chat_id, (args.get("period") or "month").strip().lower())
+
+
+async def _add_expense(chat_id: int, args: dict) -> str:
+    from agentzero.expenses import _parse_amount, add_expense
+
+    merchant = (args.get("merchant") or "").strip()
+    amount = _parse_amount(args.get("amount"))
+    if not merchant or amount is None:
+        return "I need at least a merchant and an amount to log an expense."
+    doc = await add_expense(
+        chat_id, merchant, amount,
+        args.get("currency", ""), args.get("category", "other"), args.get("description", ""),
+    )
+    return f"💸 Logged: {doc['currency']} {doc['amount']:,.2f} at {doc['merchant']} [{doc['category']}]."
+
+
+async def _check_receipts(chat_id: int, args: dict) -> str:
+    """Force a receipt scan now and report what was logged."""
+    from agentzero.expenses import scan_receipts
+
+    logged = await scan_receipts(chat_id)
+    if not logged:
+        return "Checked your inboxes — no new receipts found."
+    lines = [f"Logged {len(logged)} new expense(s):"]
+    for d in logged[:15]:
+        lines.append(f"  • {d['currency']} {d['amount']:,.2f} · {d['merchant']} [{d['category']}]")
+    return "\n".join(lines)

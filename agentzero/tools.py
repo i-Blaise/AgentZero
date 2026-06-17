@@ -340,6 +340,129 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "list_applications",
+        "description": (
+            "List the user's tracked job applications and their statuses (applied, replied, "
+            "interview, offer, rejected). Use when they ask 'what's the status of my "
+            "applications', 'which jobs have I heard back from', etc."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Optional filter: applied | replied | interview | offer | rejected.",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "track_application",
+        "description": (
+            "Manually start tracking a job application (the bot also auto-detects these from "
+            "application-confirmation emails). Use when the user says 'I applied to X for Y'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string", "description": "Company applied to."},
+                "role": {"type": "string", "description": "Role/title (optional)."},
+                "status": {
+                    "type": "string",
+                    "description": "Initial status (default 'applied'): applied|replied|interview|offer|rejected.",
+                },
+            },
+            "required": ["company"],
+        },
+    },
+    {
+        "name": "update_application",
+        "description": (
+            "Update a tracked application's status or notes — e.g. the user says 'I got an "
+            "interview with X', 'X rejected me', 'got the offer from Y'. Fuzzy-matches by company."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Company (or role) identifying which application."},
+                "status": {
+                    "type": "string",
+                    "description": "New status: applied|replied|interview|offer|rejected|closed.",
+                },
+                "notes": {"type": "string", "description": "Optional note to attach."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "check_job_replies",
+        "description": (
+            "Scan the inbox NOW for new application confirmations and employer replies, update "
+            "tracking, and report what changed. Use when the user asks 'any replies to my job "
+            "applications?', 'check for job updates', etc. (This also runs automatically on a schedule.)"
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "list_expenses",
+        "description": (
+            "List the user's logged expenses (auto-extracted from payment-receipt emails, plus "
+            "any added manually). Use for 'what did I spend on X', 'show my recent expenses'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "period": {"type": "string", "description": "today | week | month | all (default month)."},
+                "category": {
+                    "type": "string",
+                    "description": "Optional: food, transport, shopping, subscription, bills, entertainment, travel, health, other.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "expense_summary",
+        "description": (
+            "Summarise spending over a period — totals broken down by category and currency. "
+            "Use for 'how much did I spend this week/month', 'where is my money going'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "period": {"type": "string", "description": "today | week | month | all (default month)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "add_expense",
+        "description": (
+            "Manually log an expense the bot didn't pick up from email — e.g. the user says "
+            "'I spent 50 cedis on lunch', 'log 20 dollars for the taxi'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string", "description": "Who was paid / what it was for."},
+                "amount": {"type": "number", "description": "Amount spent (number)."},
+                "currency": {"type": "string", "description": "3-letter currency (default the user's local currency)."},
+                "category": {"type": "string", "description": "food|transport|shopping|subscription|bills|entertainment|travel|health|other."},
+                "description": {"type": "string", "description": "Optional note."},
+            },
+            "required": ["merchant", "amount"],
+        },
+    },
+    {
+        "name": "check_receipts",
+        "description": (
+            "Scan the mailboxes NOW for new payment receipts and log them, reporting what was "
+            "found. Use for 'check for new receipts', 'update my expenses'. (Also runs on a schedule.)"
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "get_status",
         "description": "Get an overview of projects and their open tasks.",
         "parameters": {

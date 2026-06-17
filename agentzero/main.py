@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update
 from telegram.constants import ChatAction
 
@@ -20,7 +21,9 @@ from agentzero.config import (
     ALLOWED_CHAT_ID,
     AUTONOMY_ENABLED,
     EVENING_DIGEST_ENABLED,
+    EXPENSE_TRACKING_ENABLED,
     JOB_HUNT_ENABLED,
+    JOB_TRACKING_ENABLED,
     MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
@@ -47,7 +50,10 @@ from agentzero.scheduler import (
     schedule_evening_digest,
     schedule_heartbeat,
     schedule_job_digest,
+    schedule_application_scan,
+    schedule_expense_summary,
     schedule_morning_digest,
+    schedule_receipt_scan,
     schedule_reminder_followups,
     start_scheduler,
     stop_scheduler,
@@ -80,6 +86,11 @@ async def lifespan(app: FastAPI):
         schedule_evening_digest(ALLOWED_CHAT_ID)
     if JOB_HUNT_ENABLED:
         schedule_job_digest(ALLOWED_CHAT_ID)
+    if JOB_TRACKING_ENABLED:
+        schedule_application_scan(ALLOWED_CHAT_ID)
+    if EXPENSE_TRACKING_ENABLED:
+        schedule_receipt_scan(ALLOWED_CHAT_ID)
+        schedule_expense_summary(ALLOWED_CHAT_ID)
     if MCP_ENABLED:
         await load_mcp_tools()
 
@@ -103,6 +114,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Dashboard API (read-only expense JSON under /api, gated by DASHBOARD_API_KEY).
+from agentzero.api import router as api_router  # noqa: E402
+from agentzero.config import DASHBOARD_ORIGINS  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=DASHBOARD_ORIGINS,
+    allow_methods=["GET"],
+    allow_headers=["X-API-Key", "Content-Type"],
+)
+app.include_router(api_router)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +240,18 @@ async def process_update(update: Update) -> None:
         result = await send_job_digest(chat_id)
         if result is None:
             await send(chat_id, "No new postings, or no job profile yet — send me your CV and what you're after.")
+        return
+
+    if text.startswith("/applications"):
+        from agentzero.applications import _load_apps, format_applications
+
+        await send(chat_id, format_applications(await _load_apps(chat_id)))
+        return
+
+    if text.startswith("/expenses"):
+        from agentzero.expenses import expense_summary
+
+        await send(chat_id, await expense_summary(chat_id, "month"))
         return
 
     if text.startswith("/undo"):

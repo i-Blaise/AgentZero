@@ -69,6 +69,36 @@ WEB_SEARCH_PROVIDER: str = os.environ.get("WEB_SEARCH_PROVIDER", "auto")  # auto
 TAVILY_API_KEY: str = os.environ.get("TAVILY_API_KEY", "")
 BRAVE_API_KEY: str = os.environ.get("BRAVE_API_KEY", "")
 
+# Gmail over IMAP — for BACKGROUND scanning (receipts/expenses), separate from the Google MCP
+# (which is for interactive Gmail/Calendar queries). Needs a Google *app password* (Google
+# Account → Security → 2-Step Verification → App passwords). Read-only, enforced in code.
+GMAIL_IMAP_ENABLED: bool = os.environ.get("GMAIL_IMAP_ENABLED", "false").lower() == "true"
+GMAIL_IMAP_USER: str = os.environ.get("GMAIL_IMAP_USER", "")
+GMAIL_IMAP_APP_PASSWORD: str = os.environ.get("GMAIL_IMAP_APP_PASSWORD", "")
+
+# Expense tracking — scans payment receipts from the configured mailboxes (Yahoo + Gmail IMAP),
+# logs them, and reports a periodic spending summary.
+EXPENSE_TRACKING_ENABLED: bool = os.environ.get("EXPENSE_TRACKING_ENABLED", "true").lower() == "true"
+RECEIPT_SCAN_HOURS: int = int(os.environ.get("RECEIPT_SCAN_HOURS", "6"))
+DEFAULT_CURRENCY: str = os.environ.get("DEFAULT_CURRENCY", "GHS")
+EXPENSE_SUMMARY_DOW: str = os.environ.get("EXPENSE_SUMMARY_DOW", "sun")   # weekly summary day
+EXPENSE_SUMMARY_HOUR: int = int(os.environ.get("EXPENSE_SUMMARY_HOUR", "18"))
+
+# Dashboard API — read-only JSON endpoints under /api for an external spending dashboard.
+# DISABLED unless DASHBOARD_API_KEY is set (financial data — never expose unauthenticated).
+# Callers send the key in the `X-API-Key` header. DASHBOARD_ORIGINS restricts browser CORS.
+DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+DASHBOARD_ORIGINS: list[str] = [
+    o.strip() for o in os.environ.get("DASHBOARD_ORIGINS", "*").split(",") if o.strip()
+] or ["*"]
+
+# Job application tracking — auto-detects application confirmations + employer replies in
+# the (Yahoo) inbox and tracks each application's status. Needs Yahoo Mail enabled to
+# auto-scan; manual tracking works without it.
+JOB_TRACKING_ENABLED: bool = os.environ.get("JOB_TRACKING_ENABLED", "true").lower() == "true"
+APPLICATION_SCAN_HOURS: int = int(os.environ.get("APPLICATION_SCAN_HOURS", "6"))
+APPLICATION_STALE_DAYS: int = int(os.environ.get("APPLICATION_STALE_DAYS", "10"))
+
 # Yahoo Mail — read-only via IMAP. Needs a Yahoo *app password* (Account Security →
 # Generate app password), NOT your normal login password. Read-only is enforced in code
 # (mailbox opened read-only, messages fetched with PEEK, never modified or deleted).

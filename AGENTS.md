@@ -16,9 +16,10 @@ in production**.
 
 Capabilities: projects/tasks, ad-hoc reminders, freeform memory, voice notes
 (Whisper transcription), image input (vision), web search + page fetch (research
-inside the chat), read-only Yahoo Mail (IMAP, opt-in), a proactive autonomy heartbeat,
-a daily morning digest, and an MCP client layer for external platforms — Gmail + Google
-Calendar read access is LIVE (see "Google … LIVE" section below).
+inside the chat), read-only Yahoo Mail (IMAP, opt-in), automatic job-application tracking
+(scans the inbox for confirmations/replies), expense tracking (logs payment receipts from
+Yahoo + Gmail), a proactive autonomy heartbeat, a daily morning digest, and an MCP client layer
+for external platforms — Gmail + Google Calendar read access is LIVE (see "Google … LIVE" below).
 
 ## Google (Gmail + Calendar) — LIVE (read-only) as of 2026-06-14
 
@@ -53,6 +54,52 @@ Gmail + Calendar read access is connected and working in production. How it's wi
 5. Restore ExecStart to `--transport streamable-http --read-only --tool-tier core`, daemon-reload,
    restart. Re-enable AgentZero `MCP_ENABLED=true`, restart agentzero.
 An agent can do everything EXCEPT step 4 (browser approval) — hand that to the owner.
+
+## Job application tracking (`applications.py`)
+
+Autonomous loop tying the inbox to outcomes. `scheduler._application_scan_job` runs every
+`APPLICATION_SCAN_HOURS` (quiet-hours aware): `scan_inbox` pulls new mail via
+`yahoo_mail.fetch_recent` (UID-cursor `last_app_scan_uid` in `system_state`), the LLM classifies
+each as **confirmation** (→ start tracking, status `applied`), **update** (→ set status
+interview/rejected/offer/replied), or **other**, and `applications` docs are upserted (fuzzy
+company/role match, no dupes). An **update for a company with no existing record creates one
+from the reply** (e.g. an interview invite with no prior confirmation) — flagged with the
+`created` bit so the notification reads "Now tracking … (their reply came in first)". The
+classifier is told to categorise by content, not by whether the company is already tracked.
+**First scan only sets a baseline UID — it tracks forward, never trawls history.** `send_application_update` proactively reports new tracked apps, status changes,
+and **stale follow-ups** (status `applied` past `APPLICATION_STALE_DAYS` → "gone quiet, follow
+up?", flagged once via `stale_notified`). Tools: `list_applications`, `track_application`,
+`update_application`, `check_job_replies` (force a scan now — uses `gather_application_update`,
+which does NOT send, so the tool loop delivers it once). `/applications` lists them. Gated by
+`JOB_TRACKING_ENABLED`; auto-scan needs Yahoo, but manual track/update works without it. Statuses:
+applied → replied → interview → offer | rejected (closed = archived).
+
+## Expense tracking (`expenses.py` + `imap_mail.py`)
+
+Scans payment receipts across ALL configured IMAP mailboxes (Yahoo + personal Gmail) and logs
+them. `imap_mail.mail_accounts()` returns the enabled accounts (Yahoo via `YAHOO_MAIL_*`, Gmail
+via `GMAIL_IMAP_*` — Gmail here is IMAP-with-app-password, **separate from the Google MCP**,
+because the MCP returns free-text blobs unsuitable for a deterministic scanner). `scheduler._receipt_scan_job`
+runs every `RECEIPT_SCAN_HOURS` and is **silent** (a ping per purchase would be spam) — it just
+LLM-classifies each mail as `receipt` (extract merchant/amount/currency/category/date) or `other`
+and inserts into `expenses`. Per-mailbox UID cursors (`receipt_cursor_<source>`); first scan of a
+mailbox sets a baseline (tracks forward). Dedup by `email_id` = `<source>:<uid>`. **Amounts are
+grouped per currency, never summed across** (GHS vs USD stay separate). `scheduler._expense_summary_job`
+sends a weekly summary (`EXPENSE_SUMMARY_DOW`/`HOUR`). Tools: `list_expenses`, `expense_summary`,
+`add_expense` (manual), `check_receipts` (force scan now). `/expenses` shows the month summary.
+Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual add works without one.
+
+## Dashboard API (`api.py`)
+
+Read-only JSON for an external spending dashboard, mounted at `/api` on the same FastAPI app
+(so it's served through the existing Apache proxy at the bot's domain — Apache must proxy `/api`
+too; if it proxies `/` to uvicorn it already does). **Gated by `DASHBOARD_API_KEY`**: every route
+needs the `X-API-Key` header to match; if the key is unset the API is fully disabled (404) — never
+expose financial data unauthenticated. CORS is restricted by `DASHBOARD_ORIGINS` (GET only).
+Routes (all scoped to `ALLOWED_CHAT_ID`): `GET /api/health`, `/api/expenses`
+(`period|start|end|category|limit`), `/api/expenses/summary`, `/api/expenses/timeseries`
+(`bucket=day|week|month`), `/api/expenses/categories`. `period` is today|week|month|all; explicit
+`start`/`end` ISO dates override it. Amounts are grouped per currency (never summed across).
 
 ## Yahoo Mail — read-only (IMAP)
 
@@ -105,7 +152,11 @@ adapter translates them and manages its own native multi-turn message format ins
 | `digest.py` | Morning digest — daily rundown, always sends |
 | `mcp_client.py` | Generic MCP client — connect, namespace (`server__tool`), route calls |
 | `web.py` | Web search (Tavily/Brave/DuckDuckGo) + page fetch (httpx, dependency-free HTML→text). No DB writes. |
-| `yahoo_mail.py` | Yahoo Mail read-only over IMAP (`imaplib`, app password). `yahoo_search`/`yahoo_read`; blocking work in `asyncio.to_thread`. Read-only enforced (readonly select + BODY.PEEK). |
+| `yahoo_mail.py` | Yahoo Mail read-only over IMAP (`imaplib`, app password). `yahoo_search`/`yahoo_read`/`fetch_recent`; blocking work in `asyncio.to_thread`. Read-only enforced (readonly select + BODY.PEEK). |
+| `applications.py` | Job-application tracking — scans the inbox, LLM-classifies confirmations/replies, upserts the `applications` collection, proactively reports changes + stale follow-ups. |
+| `imap_mail.py` | Generic multi-account IMAP batch reader (`mail_accounts()` → Yahoo + Gmail; `fetch_recent(account, …)`). Read-only; reuses yahoo_mail's body/decode helpers. Used by background scanners. |
+| `expenses.py` | Expense tracking — scans receipts across mailboxes, LLM-extracts merchant/amount/currency/category into the `expenses` collection, summaries + weekly digest. Also the structured data access (`query_range`/`serialize_expense`/`summary_data`/`timeseries_data`) behind the dashboard API. |
+| `api.py` | Read-only dashboard JSON API mounted at `/api` (expenses list/summary/timeseries/categories). Gated by `DASHBOARD_API_KEY` (X-API-Key header); 404 when unset. |
 | `audio.py` | Whisper voice transcription (always OpenAI) |
 | `telegram_io.py` | `send()` with 4096-char splitting |
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
@@ -113,14 +164,18 @@ adapter translates them and manages its own native multi-turn message format ins
 ### Data model (MongoDB collections)
 `projects`, `tasks`, `events` (undo log), `chat_history` (last ~10 msgs/chat),
 `reminders`, `recurring_reminders` (cron-style repeating pings), `memory` (freeform facts),
-`system_state` (last/next proactive-nudge time, nudge cadence), `seen_jobs`, `profile`,
-`disambiguation` (unused stub).
+`system_state` (last/next proactive-nudge time, nudge cadence, `last_app_scan_uid`),
+`seen_jobs`, `applications` (tracked job applications), `expenses` (logged from receipts),
+`profile`, `disambiguation` (unused stub). `system_state` also holds per-mailbox receipt scan
+cursors (`receipt_cursor_<source>`) and the application scan cursor (`last_app_scan_uid`).
 
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
 `get_status`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
 `complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
-`set_job_profile`, `find_jobs`, `web_search`, `web_fetch`. When `YAHOO_MAIL_ENABLED`, also
+`set_job_profile`, `find_jobs`, `web_search`, `web_fetch`, `list_applications`,
+`track_application`, `update_application`, `check_job_replies`, `list_expenses`,
+`expense_summary`, `add_expense`, `check_receipts`. When `YAHOO_MAIL_ENABLED`, also
 `yahoo_search`/`yahoo_read` (read-only Yahoo Mail over IMAP). MCP tools added at runtime, `google__…`.
 
 **Web search/fetch** (`web.py`): `web_search` picks a backend via `WEB_SEARCH_PROVIDER`
@@ -187,7 +242,8 @@ let commitments silently drop. Completion always requires the user's explicit wo
 ### Bot commands (fallbacks / manual triggers)
 `/start` `/status [work|personal]` `/undo` `/done <task>` `/add <project> | <task>`
 `/snooze <task> until <YYYY-MM-DD>` `/checkin` (force heartbeat) `/brief` (force morning
-digest) `/winddown` (force evening digest) `/jobs` (force job drop).
+digest) `/winddown` (force evening digest) `/jobs` (force job drop) `/applications` (list tracked
+job applications) `/expenses` (this month's spending summary).
 
 ## Conventions & gotchas (read before editing)
 

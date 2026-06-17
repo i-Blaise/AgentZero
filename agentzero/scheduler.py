@@ -247,6 +247,86 @@ async def load_recurring_reminders() -> None:
         logger.info("Re-loaded %d recurring reminder(s)", len(rows))
 
 
+async def _application_scan_job(chat_id: int) -> None:
+    """Scan the inbox for application confirmations/replies and proactively report changes.
+    Quiet-hours aware — skips overnight; the next scan picks up anything missed."""
+    from agentzero.applications import send_application_update
+    from agentzero.autonomy import _in_quiet_hours
+
+    if _in_quiet_hours(datetime.now(timezone.utc).astimezone(ZoneInfo(TIMEZONE))):
+        return
+    try:
+        await send_application_update(chat_id)
+    except Exception:
+        logger.exception("Application scan job failed")
+
+
+def schedule_application_scan(chat_id: int) -> None:
+    from agentzero.config import APPLICATION_SCAN_HOURS
+
+    sched = get_scheduler()
+    sched.add_job(
+        _application_scan_job,
+        trigger=IntervalTrigger(hours=max(1, APPLICATION_SCAN_HOURS)),
+        args=[chat_id],
+        id="application_scan",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    logger.info("Application scan scheduled every %d h", max(1, APPLICATION_SCAN_HOURS))
+
+
+async def _receipt_scan_job(chat_id: int) -> None:
+    """Silently scan mailboxes for payment receipts and log them (no per-receipt ping)."""
+    from agentzero.expenses import scan_receipts
+
+    try:
+        await scan_receipts(chat_id)
+    except Exception:
+        logger.exception("Receipt scan job failed")
+
+
+def schedule_receipt_scan(chat_id: int) -> None:
+    from agentzero.config import RECEIPT_SCAN_HOURS
+
+    sched = get_scheduler()
+    sched.add_job(
+        _receipt_scan_job,
+        trigger=IntervalTrigger(hours=max(1, RECEIPT_SCAN_HOURS)),
+        args=[chat_id],
+        id="receipt_scan",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+    logger.info("Receipt scan scheduled every %d h", max(1, RECEIPT_SCAN_HOURS))
+
+
+async def _expense_summary_job(chat_id: int) -> None:
+    from agentzero.expenses import send_weekly_summary
+
+    try:
+        await send_weekly_summary(chat_id)
+    except Exception:
+        logger.exception("Weekly expense summary job failed")
+
+
+def schedule_expense_summary(chat_id: int) -> None:
+    from agentzero.config import EXPENSE_SUMMARY_DOW, EXPENSE_SUMMARY_HOUR
+
+    sched = get_scheduler()
+    sched.add_job(
+        _expense_summary_job,
+        trigger=CronTrigger(day_of_week=EXPENSE_SUMMARY_DOW, hour=EXPENSE_SUMMARY_HOUR, minute=0),
+        args=[chat_id],
+        id="expense_summary",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info(
+        "Weekly expense summary scheduled %s at %02d:00", EXPENSE_SUMMARY_DOW, EXPENSE_SUMMARY_HOUR
+    )
+
+
 async def _heartbeat_job(chat_id: int) -> None:
     from agentzero.autonomy import run_heartbeat
 

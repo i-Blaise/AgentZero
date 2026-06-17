@@ -132,6 +132,52 @@ def _sync_search(query: str, folder: str, limit: int) -> list[dict]:
             pass
 
 
+def _sync_fetch_recent(folder: str, limit: int, since_uid: str | None) -> list[dict]:
+    """Fetch recent messages (newer than since_uid) WITH a body snippet, in one session.
+    Used by the job-application scanner so it isn't opening a connection per message."""
+    M = _connect()
+    try:
+        M.select(folder, readonly=True)
+        if since_uid:
+            typ, data = M.uid("search", None, f"UID {int(since_uid) + 1}:*")
+        else:
+            typ, data = M.uid("search", None, "ALL")
+        if typ != "OK" or not data or not data[0]:
+            return []
+        uids = data[0].split()
+        if since_uid:
+            # "UID n:*" always returns at least the highest uid even if ≤ n — filter it.
+            uids = [u for u in uids if int(u) > int(since_uid)]
+        uids = uids[-limit:]  # oldest → newest
+        out: list[dict] = []
+        for uid in uids:
+            typ, md = M.uid("fetch", uid, "(BODY.PEEK[])")
+            if typ != "OK" or not md or not md[0]:
+                continue
+            msg = email.message_from_bytes(md[0][1])
+            date = ""
+            if msg.get("Date"):
+                try:
+                    date = parsedate_to_datetime(msg["Date"]).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    date = _decode(msg.get("Date"))
+            out.append(
+                {
+                    "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+                    "from": _decode(msg.get("From")),
+                    "subject": _decode(msg.get("Subject")) or "(no subject)",
+                    "date": date,
+                    "snippet": _extract_body(msg)[:600],
+                }
+            )
+        return out
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
 def _sync_read(uid: str, folder: str) -> dict | None:
     M = _connect()
     try:
@@ -188,6 +234,22 @@ async def yahoo_search(query: str = "", folder: str = "INBOX", limit: int = 10) 
         )
     lines.append('(call yahoo_read with a uid to read that message in full)')
     return "\n".join(lines)
+
+
+async def fetch_recent(
+    folder: str = "INBOX", limit: int = 25, since_uid: str | None = None
+) -> list[dict]:
+    """Structured recent messages (uid/from/subject/date/snippet) for the scanner. Returns
+    [] if Yahoo isn't configured or on error — callers treat that as 'nothing new'."""
+    if not YAHOO_MAIL_ENABLED:
+        return []
+    try:
+        return await asyncio.to_thread(
+            _sync_fetch_recent, folder or "INBOX", max(1, min(int(limit or 25), 50)), since_uid
+        )
+    except Exception:
+        logger.exception("Yahoo IMAP fetch_recent failed")
+        return []
 
 
 async def yahoo_read(uid: str, folder: str = "INBOX") -> str:
