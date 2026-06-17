@@ -12,6 +12,7 @@ import asyncio
 import email
 import imaplib
 import logging
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 from agentzero.config import (
@@ -48,6 +49,31 @@ def mail_accounts() -> list[dict]:
     return [a for a in spec if a["enabled"] and a["user"] and a["password"]]
 
 
+def _fetch_uid_list(M: imaplib.IMAP4_SSL, uids: list) -> list[dict]:
+    out: list[dict] = []
+    for uid in uids:
+        typ, md = M.uid("fetch", uid, "(BODY.PEEK[])")
+        if typ != "OK" or not md or not md[0]:
+            continue
+        msg = email.message_from_bytes(md[0][1])
+        date = ""
+        if msg.get("Date"):
+            try:
+                date = parsedate_to_datetime(msg["Date"]).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                date = _decode(msg.get("Date"))
+        out.append(
+            {
+                "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+                "from": _decode(msg.get("From")),
+                "subject": _decode(msg.get("Subject")) or "(no subject)",
+                "date": date,
+                "snippet": _extract_body(msg)[:700],
+            }
+        )
+    return out
+
+
 def _sync_fetch_recent(
     host: str, user: str, password: str, folder: str, limit: int, since_uid: str | None
 ) -> list[dict]:
@@ -64,29 +90,28 @@ def _sync_fetch_recent(
         uids = data[0].split()
         if since_uid:
             uids = [u for u in uids if int(u) > int(since_uid)]
-        uids = uids[-limit:]
-        out: list[dict] = []
-        for uid in uids:
-            typ, md = M.uid("fetch", uid, "(BODY.PEEK[])")
-            if typ != "OK" or not md or not md[0]:
-                continue
-            msg = email.message_from_bytes(md[0][1])
-            date = ""
-            if msg.get("Date"):
-                try:
-                    date = parsedate_to_datetime(msg["Date"]).strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    date = _decode(msg.get("Date"))
-            out.append(
-                {
-                    "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
-                    "from": _decode(msg.get("From")),
-                    "subject": _decode(msg.get("Subject")) or "(no subject)",
-                    "date": date,
-                    "snippet": _extract_body(msg)[:700],
-                }
-            )
-        return out
+        return _fetch_uid_list(M, uids[-limit:])
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+def _sync_fetch_since(
+    host: str, user: str, password: str, folder: str, limit: int, days: int
+) -> list[dict]:
+    """Fetch messages received within the last `days` (IMAP SINCE), most recent first capped."""
+    since_str = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
+    M = imaplib.IMAP4_SSL(host, 993)
+    M.login(user, password)
+    try:
+        M.select(folder, readonly=True)
+        typ, data = M.uid("search", None, "SINCE", since_str)
+        if typ != "OK" or not data or not data[0]:
+            return []
+        uids = data[0].split()[-limit:]
+        return _fetch_uid_list(M, uids)
     finally:
         try:
             M.logout()
@@ -106,4 +131,17 @@ async def fetch_recent(
         )
     except Exception:
         logger.exception("IMAP fetch_recent failed for %s", account.get("source"))
+        return []
+
+
+async def fetch_since(account: dict, days: int = 30, limit: int = 600) -> list[dict]:
+    """Messages from the last `days` for one account (for historical backfill). [] on error."""
+    try:
+        return await asyncio.to_thread(
+            _sync_fetch_since,
+            account["host"], account["user"], account["password"],
+            "INBOX", max(1, min(int(limit), 1500)), max(1, int(days)),
+        )
+    except Exception:
+        logger.exception("IMAP fetch_since failed for %s", account.get("source"))
         return []

@@ -108,6 +108,44 @@ async def test_add_list_and_summary_tools(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_backfill_logs_history_and_dedupes(mock_db):
+    """Historical backfill logs receipts from the window and never double-logs an email."""
+    emails = [
+        _email("301", "no-reply@netflix.com", "Your Netflix receipt", "GHS 65 charged"),
+        _email("302", "friend@gmail.com", "lunch?", "wanna grab food"),  # not a receipt
+    ]
+    classified = [
+        {"uid": "301", "category": "receipt", "merchant": "Netflix", "amount": "65",
+         "currency": "GHS", "date": "2026-06-01", "expense_category": "subscription", "description": "monthly"},
+        {"uid": "302", "category": "other", "merchant": "", "amount": ""},
+    ]
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[ACCT]), \
+         patch("agentzero.imap_mail.fetch_since", new=AsyncMock(return_value=emails)), \
+         patch("agentzero.expenses.get_provider", return_value=_provider(classified)):
+        logged = await expenses.backfill_receipts(CHAT_ID, 30)
+        assert len(logged) == 1
+        # run again — same emails — must not duplicate
+        again = await expenses.backfill_receipts(CHAT_ID, 30)
+
+    assert again == []
+    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID, "merchant": "Netflix"}) == 1
+
+
+@pytest.mark.asyncio
+async def test_check_receipts_days_triggers_backfill(mock_db):
+    emails = [_email("400", "no-reply@spotify.com", "Spotify Premium receipt", "USD 10 charged")]
+    classified = [{"uid": "400", "category": "receipt", "merchant": "Spotify", "amount": "10",
+                   "currency": "USD", "date": "2026-06-05", "expense_category": "subscription", "description": ""}]
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[ACCT]), \
+         patch("agentzero.imap_mail.fetch_since", new=AsyncMock(return_value=emails)) as fs, \
+         patch("agentzero.expenses.get_provider", return_value=_provider(classified)):
+        out = await execute_tool(CHAT_ID, _tc("check_receipts", days=30))
+    fs.assert_awaited()  # went through the backfill (fetch_since), not the forward scan
+    assert "Spotify" in out
+    assert "last 30 days" in out
+
+
+@pytest.mark.asyncio
 async def test_check_receipts_tool_no_double_send(mock_db):
     with patch("agentzero.imap_mail.mail_accounts", return_value=[]), \
          patch("agentzero.telegram_io.send", new_callable=AsyncMock) as mock_send:

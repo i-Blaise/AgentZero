@@ -151,37 +151,69 @@ async def scan_receipts(chat_id: int) -> list[dict]:
             logger.info("Expense scan baseline for %s set at uid %s", source, max_uid)
             continue
 
-        by_uid = {str(e["uid"]): e for e in emails}
-        for r in await _classify(emails):
-            if not isinstance(r, dict) or (r.get("category") or "").lower() != "receipt":
-                continue
-            amount = _parse_amount(r.get("amount"))
-            if amount is None or amount <= 0:
-                continue
-            uid = str(r.get("uid") or "")
-            email_id = f"{source}:{uid}"
-            if await _already_logged(chat_id, email_id):
-                continue
-            src_email = by_uid.get(uid, {})
-            spent_at = _resolve_date(r.get("date"), src_email.get("date"))
-            cat = (r.get("expense_category") or "other").lower()
-            doc = await _log_expense(
-                chat_id,
-                {
-                    "chat_id": chat_id,
-                    "merchant": (r.get("merchant") or "Unknown").strip(),
-                    "amount": amount,
-                    "currency": (r.get("currency") or DEFAULT_CURRENCY).strip().upper()[:3],
-                    "category": cat if cat in _CATEGORIES else "other",
-                    "description": (r.get("description") or "").strip(),
-                    "spent_at": spent_at,
-                    "source": source,
-                    "email_id": email_id,
-                    "created_at": datetime.now(timezone.utc),
-                },
-            )
-            logged.append(doc)
+        logged.extend(await _log_receipts(chat_id, source, emails, await _classify(emails)))
         await _set_cursor(chat_id, source, max_uid)
+    return logged
+
+
+async def _log_receipts(
+    chat_id: int, source: str, emails: list[dict], results: list[dict]
+) -> list[dict]:
+    """Turn classifier results into logged expense docs (receipts only, deduped)."""
+    by_uid = {str(e["uid"]): e for e in emails}
+    logged: list[dict] = []
+    for r in results:
+        if not isinstance(r, dict) or (r.get("category") or "").lower() != "receipt":
+            continue
+        amount = _parse_amount(r.get("amount"))
+        if amount is None or amount <= 0:
+            continue
+        uid = str(r.get("uid") or "")
+        email_id = f"{source}:{uid}"
+        if await _already_logged(chat_id, email_id):
+            continue
+        src_email = by_uid.get(uid, {})
+        spent_at = _resolve_date(r.get("date"), src_email.get("date"))
+        cat = (r.get("expense_category") or "other").lower()
+        doc = await _log_expense(
+            chat_id,
+            {
+                "chat_id": chat_id,
+                "merchant": (r.get("merchant") or "Unknown").strip(),
+                "amount": amount,
+                "currency": (r.get("currency") or DEFAULT_CURRENCY).strip().upper()[:3],
+                "category": cat if cat in _CATEGORIES else "other",
+                "description": (r.get("description") or "").strip(),
+                "spent_at": spent_at,
+                "source": source,
+                "email_id": email_id,
+                "created_at": datetime.now(timezone.utc),
+            },
+        )
+        logged.append(doc)
+    return logged
+
+
+def _chunks(seq: list, n: int):
+    for i in range(0, len(seq), n):
+        yield seq[i : i + n]
+
+
+async def backfill_receipts(chat_id: int, days: int = 30, per_account_limit: int = 600) -> list[dict]:
+    """One-off historical scan: pull the last `days` of mail from every mailbox, classify in
+    batches, and log receipts (deduped by email_id). Does NOT move the forward scan cursor."""
+    from agentzero import imap_mail
+
+    if not EXPENSE_TRACKING_ENABLED:
+        return []
+    logged: list[dict] = []
+    for acc in imap_mail.mail_accounts():
+        source = acc["source"]
+        emails = await imap_mail.fetch_since(acc, days, per_account_limit)
+        for chunk in _chunks(emails, 25):
+            results = await _classify(chunk)
+            logged.extend(await _log_receipts(chat_id, source, chunk, results))
+        logger.info("Backfill (%s, %dd): scanned %d emails", source, days, len(emails))
     return logged
 
 

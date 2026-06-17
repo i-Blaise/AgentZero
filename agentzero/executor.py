@@ -889,13 +889,24 @@ async def _add_expense(chat_id: int, args: dict) -> str:
 
 
 async def _check_receipts(chat_id: int, args: dict) -> str:
-    """Force a receipt scan now and report what was logged."""
-    from agentzero.expenses import scan_receipts
+    """Scan for receipts now. With `days`, do a historical backfill of the last N days;
+    otherwise just pick up anything new since the last scan."""
+    days = args.get("days")
+    if days:
+        from agentzero.expenses import backfill_receipts
 
-    logged = await scan_receipts(chat_id)
+        logged = await backfill_receipts(chat_id, int(days))
+        scope = f"the last {int(days)} days"
+    else:
+        from agentzero.expenses import scan_receipts
+
+        logged = await scan_receipts(chat_id)
+        scope = "your inboxes"
     if not logged:
-        return "Checked your inboxes — no new receipts found."
-    lines = [f"Logged {len(logged)} new expense(s):"]
-    for d in logged[:15]:
+        return f"Scanned {scope} — no new receipts found."
+    lines = [f"Logged {len(logged)} expense(s) from {scope}:"]
+    for d in logged[:20]:
         lines.append(f"  • {d['currency']} {d['amount']:,.2f} · {d['merchant']} [{d['category']}]")
+    if len(logged) > 20:
+        lines.append(f"  …and {len(logged) - 20} more.")
     return "\n".join(lines)

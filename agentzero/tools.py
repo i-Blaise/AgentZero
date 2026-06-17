@@ -457,10 +457,21 @@ TOOLS: list[dict] = [
     {
         "name": "check_receipts",
         "description": (
-            "Scan the mailboxes NOW for new payment receipts and log them, reporting what was "
-            "found. Use for 'check for new receipts', 'update my expenses'. (Also runs on a schedule.)"
+            "Scan the mailboxes NOW for payment receipts and log them, reporting what was found. "
+            "Use for 'check for new receipts', 'update my expenses'. Pass 'days' to backfill "
+            "historically — e.g. 'scan my receipts from the last month' → days=30. (A forward "
+            "scan also runs automatically on a schedule.)"
         ),
-        "parameters": {"type": "object", "properties": {}, "required": []},
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": "Optional: scan the last N days (historical backfill). Omit for only-new.",
+                }
+            },
+            "required": [],
+        },
     },
     {
         "name": "get_status",

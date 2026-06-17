@@ -86,7 +86,10 @@ and inserts into `expenses`. Per-mailbox UID cursors (`receipt_cursor_<source>`)
 mailbox sets a baseline (tracks forward). Dedup by `email_id` = `<source>:<uid>`. **Amounts are
 grouped per currency, never summed across** (GHS vs USD stay separate). `scheduler._expense_summary_job`
 sends a weekly summary (`EXPENSE_SUMMARY_DOW`/`HOUR`). Tools: `list_expenses`, `expense_summary`,
-`add_expense` (manual), `check_receipts` (force scan now). `/expenses` shows the month summary.
+`add_expense` (manual), `check_receipts` (force scan now; pass `days=N` for a historical
+backfill — `expenses.backfill_receipts` pulls the last N days via `imap_mail.fetch_since`,
+classifies in batches, logs deduped by `email_id`, and does NOT move the forward cursor).
+`/expenses` shows the month summary.
 Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual add works without one.
 
 ## Dashboard API (`api.py`)
