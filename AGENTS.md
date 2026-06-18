@@ -118,7 +118,11 @@ needs the `X-API-Key` header to match; if the key is unset the API is fully disa
 expose financial data unauthenticated. CORS is restricted by `DASHBOARD_ORIGINS` (GET only).
 Routes (all scoped to `ALLOWED_CHAT_ID`): `GET /api/health`, `/api/expenses`
 (`period|start|end|category|limit`), `/api/expenses/summary`, `/api/expenses/timeseries`
-(`bucket=day|week|month`), `/api/expenses/categories`. `period` is today|week|month|all; explicit
+(`bucket=day|week|month`), `/api/expenses/categories`, and `/api/applications` (optional
+`status` filter) → `{count, by_status, cv_on_file, applications:[{id, company, title, status,
+status_label, applied_at, last_update_at, source, mailbox, mailbox_url, cv_used, notes}]}`.
+`mailbox_url` is a webmail deep *search* link (IMAP has no stable per-message URL); `cv_used` is
+the attached CV filename captured from sent applications; `cv_on_file` is the profile CV. `period` is today|week|month|all; explicit
 `start`/`end` ISO dates override it. Amounts are grouped per currency (never summed across).
 
 ## Yahoo Mail — read-only (IMAP)

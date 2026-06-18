@@ -64,6 +64,13 @@ def _fetch_uid_list(M: imaplib.IMAP4_SSL, uids: list) -> list[dict]:
                 date = parsedate_to_datetime(msg["Date"]).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 date = _decode(msg.get("Date"))
+        attachments = []
+        if msg.is_multipart():
+            for part in msg.walk():
+                if "attachment" in str(part.get("Content-Disposition") or "").lower():
+                    fn = part.get_filename()
+                    if fn:
+                        attachments.append(_decode(fn))
         out.append(
             {
                 "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
@@ -72,6 +79,7 @@ def _fetch_uid_list(M: imaplib.IMAP4_SSL, uids: list) -> list[dict]:
                 "subject": _decode(msg.get("Subject")) or "(no subject)",
                 "date": date,
                 "snippet": _extract_body(msg)[:700],
+                "attachments": attachments,
             }
         )
     return out

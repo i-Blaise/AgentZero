@@ -72,6 +72,33 @@ async def test_summary_endpoint_groups_per_currency(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_applications_endpoint(mock_db):
+    now = datetime(2026, 6, 10, tzinfo=timezone.utc)
+    await mock_db.applications.insert_many([
+        {"chat_id": CHAT_ID, "company": "Acme", "role": "Backend Engineer", "status": "interview",
+         "source": "yahoo:sent", "cv_used": "CV.pdf", "applied_at": now, "last_update_at": now},
+        {"chat_id": CHAT_ID, "company": "Globex", "role": "SRE", "status": "applied",
+         "source": "gmail", "applied_at": now, "last_update_at": now},
+    ])
+    await mock_db.profile.insert_one({"chat_id": CHAT_ID, "cv": "Blaise — software engineer, 5y…"})
+
+    with patch("agentzero.api.DASHBOARD_API_KEY", KEY), \
+         patch("agentzero.api.ALLOWED_CHAT_ID", CHAT_ID):
+        client = TestClient(_app())
+        r = client.get("/api/applications", headers={"X-API-Key": KEY})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    assert body["by_status"] == {"interview": 1, "applied": 1}
+    assert body["cv_on_file"].startswith("Blaise")
+    acme = next(a for a in body["applications"] if a["company"] == "Acme")
+    assert acme["title"] == "Backend Engineer"
+    assert acme["cv_used"] == "CV.pdf"
+    assert acme["mailbox"] == "Yahoo · Sent"
+    assert acme["mailbox_url"].startswith("https://mail.yahoo.com/")
+
+
+@pytest.mark.asyncio
 async def test_timeseries_and_categories(mock_db):
     await _seed(mock_db)
     with patch("agentzero.api.DASHBOARD_API_KEY", KEY), \

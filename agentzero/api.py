@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from agentzero import expenses
+from agentzero import applications, expenses
 from agentzero.config import ALLOWED_CHAT_ID, DASHBOARD_API_KEY
 
 
@@ -95,3 +95,16 @@ async def api_timeseries(
 @router.get("/expenses/categories")
 async def api_categories() -> dict:
     return {"categories": expenses._CATEGORIES}
+
+
+# --- Job applications -------------------------------------------------------
+
+@router.get("/applications")
+async def api_applications(status: str | None = None) -> dict:
+    rows = await applications.query_applications(ALLOWED_CHAT_ID, status)
+    return {
+        "count": len(rows),
+        "by_status": applications.status_counts(rows),
+        "cv_on_file": await applications.profile_cv(ALLOWED_CHAT_ID),
+        "applications": [applications.serialize_application(r) for r in rows],
+    }

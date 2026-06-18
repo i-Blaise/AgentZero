@@ -17,6 +17,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from urllib.parse import quote
 
 from agentzero.config import APPLICATION_STALE_DAYS, JOB_TRACKING_ENABLED
 from agentzero.db import get_db
@@ -38,6 +39,19 @@ _VALID_STATUS = set(_STATUS_LABEL)
 
 def _sim(a: str, b: str) -> float:
     return SequenceMatcher(None, (a or "").lower(), (b or "").lower()).ratio()
+
+
+def _pick_cv(attachments: list[str]) -> str:
+    """Pick the CV/résumé filename from a sent email's attachments."""
+    if not attachments:
+        return ""
+    for a in attachments:
+        if re.search(r"cv|resume|r[eé]sum", a, re.I):
+            return a
+    for a in attachments:
+        if a.lower().endswith((".pdf", ".doc", ".docx")):
+            return a
+    return attachments[0]
 
 
 def _aware(dt):
@@ -186,7 +200,7 @@ async def _find_app(chat_id: int, company: str, role: str = "") -> dict | None:
 
 async def upsert_application(
     chat_id: int, company: str, role: str = "", status: str = "applied",
-    applied_at: datetime | None = None, source: str = "", uid: str = "",
+    applied_at: datetime | None = None, source: str = "", uid: str = "", cv_used: str = "",
 ) -> tuple[dict, bool]:
     """Create or update an application. Returns (doc, created)."""
     db = get_db()
@@ -203,6 +217,8 @@ async def upsert_application(
             updates["role"] = role
         if uid:
             updates["last_email_uid"] = uid
+        if cv_used and not existing.get("cv_used"):
+            updates["cv_used"] = cv_used
         await db.applications.update_one({"_id": existing["_id"]}, {"$set": updates})
         existing.update(updates)
         return existing, False
@@ -215,6 +231,7 @@ async def upsert_application(
         "last_update_at": now,
         "last_email_uid": uid,
         "source": source,
+        "cv_used": cv_used,
         "stale_notified": False,
         "created_at": now,
     }
@@ -303,15 +320,18 @@ async def scan_sent(chat_id: int) -> list[dict]:
             await _set_sent_cursor(chat_id, source, max_uid)
             logger.info("Sent-application baseline for %s set at uid %s", source, max_uid)
             continue
+        by_uid = {str(e["uid"]): e for e in emails}
         for r in await _classify_sent(emails):
             if not isinstance(r, dict) or (r.get("category") or "").lower() != "application":
                 continue
             company = (r.get("company") or "").strip()
             if not company:
                 continue
+            uid = str(r.get("uid") or "")
+            cv_used = _pick_cv(by_uid.get(uid, {}).get("attachments", []))
             doc, created = await upsert_application(
                 chat_id, company, (r.get("role") or "").strip(), "applied",
-                source=f"{source}:sent", uid=str(r.get("uid") or ""),
+                source=f"{source}:sent", uid=uid, cv_used=cv_used,
             )
             if created:
                 new_tracked.append(doc)
@@ -381,6 +401,79 @@ async def send_application_update(chat_id: int) -> str | None:
 # ---------------------------------------------------------------------------
 # Formatting (for the list tool)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Structured data access (for the dashboard API)
+# ---------------------------------------------------------------------------
+
+_MAILBOX_NAMES = {"yahoo": "Yahoo", "gmail": "Gmail", "manual": "Manual entry"}
+
+
+def _mailbox_label(source: str) -> str:
+    if not source or source == "manual":
+        return "Manual entry"
+    parts = source.split(":")
+    acct = _MAILBOX_NAMES.get(parts[0], parts[0].title())
+    folder = "Sent" if len(parts) > 1 and parts[1] == "sent" else "Inbox"
+    return f"{acct} · {folder}"
+
+
+def _mailbox_url(source: str, company: str) -> str | None:
+    """A deep search link that opens the right webmail pre-searched for the company —
+    IMAP gives no stable per-message URL, so this lands the user near the email."""
+    acct = (source or "").split(":")[0]
+    q = quote(company or "")
+    if acct == "yahoo":
+        return f"https://mail.yahoo.com/d/search/keyword={q}"
+    if acct == "gmail":
+        return f"https://mail.google.com/mail/u/0/#search/{q}"
+    return None
+
+
+async def query_applications(chat_id: int, status: str | None = None) -> list[dict]:
+    db = get_db()
+    q: dict = {"chat_id": chat_id}
+    if status:
+        q["status"] = status
+    rows = await db.applications.find(q).to_list(None)
+    order = {"offer": 0, "interview": 1, "replied": 2, "applied": 3, "rejected": 4, "closed": 5}
+    rows.sort(key=lambda r: order.get(r.get("status"), 9))
+    return rows
+
+
+def serialize_application(doc: dict) -> dict:
+    applied = _aware(doc.get("applied_at"))
+    updated = _aware(doc.get("last_update_at"))
+    src = doc.get("source", "")
+    return {
+        "id": str(doc.get("_id")),
+        "company": doc.get("company"),
+        "title": doc.get("role") or "",
+        "status": doc.get("status"),
+        "status_label": _STATUS_LABEL.get(doc.get("status"), doc.get("status")),
+        "applied_at": applied.isoformat() if applied else None,
+        "last_update_at": updated.isoformat() if updated else None,
+        "source": src,
+        "mailbox": _mailbox_label(src),
+        "mailbox_url": _mailbox_url(src, doc.get("company", "")),
+        "cv_used": doc.get("cv_used") or "",
+        "notes": doc.get("notes") or "",
+    }
+
+
+def status_counts(rows: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for r in rows:
+        s = r.get("status", "applied")
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+async def profile_cv(chat_id: int) -> str | None:
+    db = get_db()
+    prof = await db.profile.find_one({"chat_id": chat_id}) or await db.profile.find_one({}) or {}
+    return (prof.get("cv") or "").strip() or None
+
 
 def format_applications(apps: list[dict], status_filter: str | None = None) -> str:
     apps = [a for a in apps if a.get("status") != "closed"]

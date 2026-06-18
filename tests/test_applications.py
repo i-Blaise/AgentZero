@@ -138,6 +138,43 @@ async def test_sent_application_starts_tracking(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_sent_application_captures_cv_filename(mock_db):
+    await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "sent_app_cursor_yahoo": "100"})
+    email = _email("101", "me@y.com", "Application for Data Analyst", "my application")
+    email["attachments"] = ["cover.txt", "Blaise_Mennia_CV.pdf"]
+    prov = _provider([{"uid": "101", "category": "application", "company": "Initech", "role": "Data Analyst"}])
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[SENT_ACCT]), \
+         patch("agentzero.imap_mail.fetch_recent", new=AsyncMock(return_value=[email])), \
+         patch("agentzero.applications.get_provider", return_value=prov):
+        await applications.scan_sent(CHAT_ID)
+
+    app = await mock_db.applications.find_one({"chat_id": CHAT_ID, "company": "Initech"})
+    assert app["cv_used"] == "Blaise_Mennia_CV.pdf"
+
+
+def test_serialize_application_and_mailbox_links():
+    from bson import ObjectId
+    doc = {"_id": ObjectId(), "company": "Acme", "role": "Backend Engineer", "status": "interview",
+           "source": "yahoo:sent", "cv_used": "CV.pdf",
+           "applied_at": datetime(2026, 6, 1, tzinfo=timezone.utc),
+           "last_update_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
+    out = applications.serialize_application(doc)
+    assert out["company"] == "Acme" and out["title"] == "Backend Engineer"
+    assert out["status"] == "interview" and out["cv_used"] == "CV.pdf"
+    assert out["mailbox"] == "Yahoo · Sent"
+    assert out["mailbox_url"] == "https://mail.yahoo.com/d/search/keyword=Acme"
+    assert out["applied_at"].startswith("2026-06-01")
+
+    gmail_doc = {"_id": ObjectId(), "company": "Globex Corp", "role": "", "status": "applied", "source": "gmail"}
+    g = applications.serialize_application(gmail_doc)
+    assert g["mailbox"] == "Gmail · Inbox"
+    assert g["mailbox_url"] == "https://mail.google.com/mail/u/0/#search/Globex%20Corp"
+
+    manual = applications.serialize_application({"_id": ObjectId(), "company": "X", "status": "applied", "source": "manual"})
+    assert manual["mailbox"] == "Manual entry" and manual["mailbox_url"] is None
+
+
+@pytest.mark.asyncio
 async def test_sent_non_application_ignored(mock_db):
     await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "sent_app_cursor_yahoo": "100"})
     emails = [_email("101", "me@y.com", "lunch plans")]
