@@ -135,6 +135,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "add_expense": _add_expense,
         "delete_expense": _delete_expense,
         "check_receipts": _check_receipts,
+        "refresh_user_model": _refresh_user_model,
     }
     handler = handlers.get(tc.name)
     if handler is None:
@@ -771,6 +772,16 @@ async def _forget(chat_id: int, args: dict) -> str:
     await db.memory.delete_one({"_id": best["_id"]})
     await _log_event(chat_id, "forget", "memory", best["_id"], prev_state)
     return f'Forgot: {best["content"]}'
+
+
+async def _refresh_user_model(chat_id: int, args: dict) -> str:
+    """Re-synthesise the evolving user model on demand ('update what you know about me')."""
+    from agentzero.user_model import synthesize_user_model
+
+    model = await synthesize_user_model(chat_id)
+    if not model:
+        return "Couldn't refresh my read on you just now — try again shortly."
+    return "Updated my read on you:\n\n" + model
 
 
 # ---------------------------------------------------------------------------

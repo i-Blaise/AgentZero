@@ -84,6 +84,12 @@ DEFAULT_CURRENCY: str = os.environ.get("DEFAULT_CURRENCY", "GHS")
 EXPENSE_SUMMARY_DOW: str = os.environ.get("EXPENSE_SUMMARY_DOW", "sun")   # weekly summary day
 EXPENSE_SUMMARY_HOUR: int = int(os.environ.get("EXPENSE_SUMMARY_HOUR", "18"))
 
+# Self-updating user model — a daily reflection that distils memory + activity into an
+# evolving "who is the user / what they're working on / goals / patterns" summary.
+USER_MODEL_ENABLED: bool = os.environ.get("USER_MODEL_ENABLED", "true").lower() == "true"
+USER_MODEL_HOUR: int = int(os.environ.get("USER_MODEL_HOUR", "23"))
+USER_MODEL_MINUTE: int = int(os.environ.get("USER_MODEL_MINUTE", "0"))
+
 # Dashboard API — read-only JSON endpoints under /api for an external spending dashboard.
 # DISABLED unless DASHBOARD_API_KEY is set (financial data — never expose unauthenticated).
 # Callers send the key in the `X-API-Key` header. DASHBOARD_ORIGINS restricts browser CORS.

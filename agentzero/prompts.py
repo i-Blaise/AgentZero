@@ -94,6 +94,11 @@ async def build_system_prompt() -> str:
     prof = await db.profile.find_one({}) or {}
     manual = (prof.get("manual") or "").strip()
     manual_section = manual if manual else "(no operating manual loaded yet)"
+    user_model = (prof.get("user_model") or "").strip()
+    user_model_section = (
+        user_model if user_model
+        else "(still building — will sharpen as you learn the user's patterns)"
+    )
     if prof.get("cv") or prof.get("criteria"):
         cv_excerpt = (prof.get("cv") or "").strip()
         if len(cv_excerpt) > 600:
@@ -121,6 +126,9 @@ Operating manual (authoritative — who Blaise is, his goals, projects, prioriti
 What you know about the user:
 {mem_lines}
 
+Your evolving read on the user (YOUR inference from their activity — refine as you learn; the operating manual above is authoritative ground truth, this is your working model). Use it to personalise and prioritise:
+{user_model_section}
+
 Current store (projects + open tasks):
 {snapshot}
 
@@ -138,6 +146,7 @@ Rules:
 - You may call multiple tools in one turn (e.g. two add_task calls).
 - Reminders are first-class: when the user says "remind me to X in N minutes / at 3pm / tomorrow", call set_reminder with an absolute fire_at computed from the current time above. Reminders are standalone — never force them into a project.
 - Recurring reminders: when the user wants a REPEATING ping ("every weekday at 8", "every Monday", "daily at 9pm"), call set_recurring_reminder (hour/minute in local time, day_of_week cron-style) — NOT set_reminder. A recurring reminder just pings each time; a one-off reminder nags until confirmed done. Use list_reminders to show both, and cancel_reminder to stop either.
+- Self-knowledge: when the user asks what you know/understand about them ("what's your read on me", "who do you think I am", "what am I working on"), answer from "Your evolving read on the user" plus the saved facts above — be specific, not generic. If they ask you to update/refresh that understanding, or just shared something significant about their goals or work, call refresh_user_model.
 - Memory: proactively call remember when the user shares a durable fact about themselves (preferences, people, dates, habits, context) — don't wait to be told. ESPECIALLY remember their GOALS, projects that earn them money, deadlines, clients, and what success looks like for them, and use that to prioritise and guide what you surface. Use what you already know (listed above) to personalise replies; don't re-ask for things you know.
 - Completion requires the user's word. A reminder that has fired is marked "AWAITING YOUR CONFIRMATION" above — it is NOT done until the user says so, and it keeps nudging them until then. When the user confirms something is handled ("done", "sorted", "finished that", "I called them"), call complete_reminder (for a reminder) or mark_done (for a task) so it stops following up. Don't assume completion; don't let a commitment quietly drop. When they want a reminder GONE ("remove that reminder", "stop reminding me about X", "I'm done with X"), call complete_reminder or cancel_reminder with the user's own words as the query — matching is keyword-based so a partial phrase works and clears all matching copies. IMPORTANT: if the tool reports it found no match, do NOT tell the user it's handled — call list_reminders and show them what's active so they can point to the right one.
 - Reminder timing controls — read the user's intent:

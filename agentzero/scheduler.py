@@ -332,6 +332,31 @@ def schedule_expense_summary(chat_id: int) -> None:
     )
 
 
+async def _user_model_job(chat_id: int) -> None:
+    """Daily reflection — distil memory + activity into the evolving user model. Silent."""
+    from agentzero.user_model import synthesize_user_model
+
+    try:
+        await synthesize_user_model(chat_id)
+    except Exception:
+        logger.exception("User-model synthesis job failed")
+
+
+def schedule_user_model_synthesis(chat_id: int) -> None:
+    from agentzero.config import USER_MODEL_HOUR, USER_MODEL_MINUTE
+
+    sched = get_scheduler()
+    sched.add_job(
+        _user_model_job,
+        trigger=CronTrigger(hour=USER_MODEL_HOUR, minute=USER_MODEL_MINUTE),
+        args=[chat_id],
+        id="user_model",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("User-model synthesis scheduled daily at %02d:%02d", USER_MODEL_HOUR, USER_MODEL_MINUTE)
+
+
 async def _heartbeat_job(chat_id: int) -> None:
     from agentzero.autonomy import run_heartbeat
 

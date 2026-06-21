@@ -27,6 +27,7 @@ from agentzero.config import (
     MCP_ENABLED,
     MORNING_DIGEST_ENABLED,
     TELEGRAM_MODE,
+    USER_MODEL_ENABLED,
     WEBHOOK_SECRET,
     WEBHOOK_URL,
 )
@@ -55,6 +56,7 @@ from agentzero.scheduler import (
     schedule_morning_digest,
     schedule_receipt_scan,
     schedule_reminder_followups,
+    schedule_user_model_synthesis,
     start_scheduler,
     stop_scheduler,
 )
@@ -91,6 +93,8 @@ async def lifespan(app: FastAPI):
     if EXPENSE_TRACKING_ENABLED:
         schedule_receipt_scan(ALLOWED_CHAT_ID)
         schedule_expense_summary(ALLOWED_CHAT_ID)
+    if USER_MODEL_ENABLED:
+        schedule_user_model_synthesis(ALLOWED_CHAT_ID)
     if MCP_ENABLED:
         await load_mcp_tools()
 
@@ -252,6 +256,13 @@ async def process_update(update: Update) -> None:
         from agentzero.expenses import expense_summary
 
         await send(chat_id, await expense_summary(chat_id, "month"))
+        return
+
+    if text.startswith("/whoami"):
+        from agentzero.user_model import get_user_model, synthesize_user_model
+
+        model = await get_user_model(chat_id) or await synthesize_user_model(chat_id)
+        await send(chat_id, model or "Not enough to go on yet — give it a bit of activity and ask again.")
         return
 
     if text.startswith("/undo"):

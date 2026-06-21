@@ -491,6 +491,15 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "refresh_user_model",
+        "description": (
+            "Re-synthesise your evolving understanding of the user from their memory + recent "
+            "activity. Use when the user says 'update what you know about me' or after they share "
+            "something significant about their goals/work. (It also refreshes automatically daily.)"
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "get_status",
         "description": "Get an overview of projects and their open tasks.",
         "parameters": {

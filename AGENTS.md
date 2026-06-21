@@ -136,6 +136,20 @@ messages fetched with `BODY.PEEK` (never marked seen/modified/deleted). UIDs are
 uid from search stays valid for the follow-up read. To set up: generate the app password, set
 the three `YAHOO_MAIL_*` env vars, restart.
 
+## Self-updating user model (`user_model.py`)
+
+Beyond freeform `memory` facts (which it recalls), the bot maintains an *evolving inferred portrait*.
+`scheduler._user_model_job` runs daily (`USER_MODEL_HOUR`/`MINUTE`, gated by `USER_MODEL_ENABLED`):
+`synthesize_user_model` gathers the operating manual, saved memory, the previous model, and ACTIVITY
+signals (open/stalled/recently-done tasks, reminders repeatedly left undone, job-application
+follow-through), and the LLM distils a concise WHO / WORKING-ON / GOALS / PATTERNS summary into
+`profile.user_model`. `build_system_prompt` injects it as "Your evolving read on the user" (the manual
+stays the authoritative layer; this is the bot's working inference). Scope is constrained to
+work/goals/productivity — the prompt forbids inferring sensitive personal matters. Surfaced via
+`/whoami` (view, synth on first use) and the `refresh_user_model` tool ("update what you know about me").
+This is recall→understanding; the prompt tells the model to use it to personalise and prioritise. (Memory
+is still injected wholesale — retrieval/top-k is the future upgrade once it grows.)
+
 ## Core architecture
 
 NL write path: **Telegram → FastAPI webhook → load chat history + store snapshot →
@@ -183,7 +197,8 @@ adapter translates them and manages its own native multi-turn message format ins
 | `applications.py` | Job-application tracking — scans the inbox, LLM-classifies confirmations/replies, upserts the `applications` collection, proactively reports changes + stale follow-ups. |
 | `imap_mail.py` | Generic multi-account IMAP batch reader (`mail_accounts()` → Yahoo + Gmail; `fetch_recent(account, …)`). Read-only; reuses yahoo_mail's body/decode helpers. Used by background scanners. |
 | `expenses.py` | Expense tracking — scans receipts across mailboxes, LLM-extracts merchant/amount/currency/category into the `expenses` collection, summaries + weekly digest. Also the structured data access (`query_range`/`serialize_expense`/`summary_data`/`timeseries_data`) behind the dashboard API. |
-| `api.py` | Read-only dashboard JSON API mounted at `/api` (expenses list/summary/timeseries/categories). Gated by `DASHBOARD_API_KEY` (X-API-Key header); 404 when unset. |
+| `api.py` | Read-only dashboard JSON API mounted at `/api` (expenses + applications). Gated by `DASHBOARD_API_KEY` (X-API-Key header); 404 when unset. |
+| `user_model.py` | Self-updating user model — daily LLM reflection over memory + activity → an evolving WHO/WORKING-ON/GOALS/PATTERNS summary stored on `profile.user_model`, injected into every prompt. |
 | `audio.py` | Whisper voice transcription (always OpenAI) |
 | `telegram_io.py` | `send()` with 4096-char splitting |
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
@@ -279,7 +294,7 @@ let commitments silently drop. Completion always requires the user's explicit wo
 `/start` `/status [work|personal]` `/undo` `/done <task>` `/add <project> | <task>`
 `/snooze <task> until <YYYY-MM-DD>` `/checkin` (force heartbeat) `/brief` (force morning
 digest) `/winddown` (force evening digest) `/jobs` (force job drop) `/applications` (list tracked
-job applications) `/expenses` (this month's spending summary).
+job applications) `/expenses` (this month's spending summary) `/whoami` (the bot's evolving read on you).
 
 ## Conventions & gotchas (read before editing)
 
