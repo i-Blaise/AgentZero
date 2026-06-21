@@ -478,7 +478,8 @@ async def _handle_nl(
     # Gmail for ids, then fetch each body) before producing its final answer in voice.
     try:
         result = await llm.run_tool_loop(
-            history, system, tools, _execute, image=image, image_mime=image_mime
+            history, system, tools, _execute, image=image, image_mime=image_mime,
+            max_iters=10,  # headroom for self-directed research (chained search → read → act)
         )
         reply = result.text or (
             "\n".join(result.last_results) if result.last_results else "Done."

@@ -143,8 +143,11 @@ agentic tool LOOP → bot replies.**
 
 The loop (`llm.run_tool_loop`, used by `main._handle_nl`): the model calls tools, sees
 the results, and can call MORE tools before answering — repeating until it produces a
-final reply or hits `max_iters` (6). This is what lets it CHAIN calls (e.g. search Gmail
-for ids → fetch each body → summarise). `_handle_nl` passes an `execute(name, args)`
+final reply or hits `max_iters` (`_handle_nl` passes 10, for headroom on self-directed research
+that chains web_search → web_fetch → act; library default is 6). This is what lets it CHAIN calls
+(e.g. search Gmail for ids → fetch each body → summarise, or research a how-to then do it).
+The system prompt tells it to RESEARCH (web tools) rather than say "I don't know / I can't", and to
+add a proactive tip only when it clears a high relevance bar (else stay silent). `_handle_nl` passes an `execute(name, args)`
 callback that routes local tools to `executor.py` and `google__*` tools to `mcp_client`.
 The model's final text IS the reply (narrated in voice); there's no separate narration pass.
 `_handle_nl` sends a `ChatAction.TYPING` immediately, and a witty "working on it" filler
@@ -224,6 +227,15 @@ search API (Tavily/Brave/SerpAPI) is the planned breadth upgrade.
 quiet-hours-aware) keeps re-nudging until the user confirms. `complete_reminder`
 (called when the user says "done/sorted") marks it `done` and stops nudges. Reminder
 statuses: pending → awaiting_ack → done (or cancelled).
+- **Matching is keyword/token-based** (`_reminder_score`/`_select_reminders`): a partial phrase
+  ("gyacity images from brown") matches a long reminder via substring + word-overlap + fuzzy ratio,
+  and complete/cancel act on ALL strong matches (clears near-duplicate nags in one go). Whole-string
+  `_sim` alone used to silently miss these → the reminder never closed and nagged forever.
+- **`cancel_reminder` covers `awaiting_ack`**, not just `pending` — a reminder that has already fired
+  and is nagging can be removed by phrase, not only completed.
+- **Closing clears `next_nudge_at`** (complete/cancel + the by-id button paths) and `_fire_reminder`
+  refuses to fire a reminder whose status isn't `pending` — together these stop a closed reminder
+  from being resurrected/re-nudged (the stale-`next_nudge_at` data bug).
 - **One at a time, never a clump:** the follow-up loop wakes every `_FOLLOWUP_WAKE_MINUTES`
   (15) and nudges about the SINGLE most-overdue unconfirmed reminder per wake; a backlog
   trickles out across cycles instead of dumping 5-8 pings at once. Per-reminder `next_nudge_at`

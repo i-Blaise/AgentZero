@@ -419,8 +419,39 @@ async def _list_reminders(chat_id: int, args: dict) -> str:
     return "\n".join(lines)
 
 
+def _reminder_score(query: str, text: str) -> float:
+    """Match a user's phrase to a reminder by the best of: substring, fuzzy ratio, and
+    word-overlap — so a partial phrase ('gyacity images from brown') still matches a long
+    reminder ('Continue with the Gyacity website and add images sent by Brown…')."""
+    q = (query or "").lower().strip()
+    t = (text or "").lower()
+    if not q or not t:
+        return 0.0
+    if q in t or t in q:
+        return 1.0
+    ratio = _sim(q, t)
+    qtok = [w for w in re.findall(r"\w+", q) if len(w) > 2]
+    overlap = (sum(1 for w in qtok if w in t) / len(qtok)) if qtok else 0.0
+    return max(ratio, overlap)
+
+
+def _select_reminders(query: str, rows: list[dict]) -> list[dict]:
+    """Reminders to act on: all that match strongly (handles duplicates/near-duplicates),
+    else the single best if it's a plausible match, else none."""
+    scored = [(r, _reminder_score(query, r["text"])) for r in rows]
+    strong = [r for r, s in scored if s >= 0.5]
+    if strong:
+        return strong
+    if scored:
+        best, bs = max(scored, key=lambda x: x[1])
+        if bs >= 0.34:
+            return [best]
+    return []
+
+
 async def _complete_reminder(chat_id: int, args: dict) -> str:
-    """Mark a reminder done once the user confirms it's handled (stops follow-ups)."""
+    """Mark matching reminder(s) done once the user confirms (stops follow-ups). Acts on ALL
+    strong matches, so a backlog of near-duplicate nags clears in one go."""
     db = get_db()
     query = args["query"]
     rows = await db.reminders.find(
@@ -429,61 +460,79 @@ async def _complete_reminder(chat_id: int, args: dict) -> str:
     if not rows:
         return "No active reminders to close out."
 
-    best = max(rows, key=lambda r: _sim(query, r["text"]))
-    if _sim(query, best["text"]) < 0.3:
+    selected = _select_reminders(query, rows)
+    if not selected:
         return f'No active reminder matching "{query}".'
 
-    prev_state = dict(best)
-    await db.reminders.update_one(
-        {"_id": best["_id"]},
-        {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc)}},
-    )
-    await _log_event(chat_id, "complete_reminder", "reminders", best["_id"], prev_state)
-    try:
-        from agentzero.scheduler import get_scheduler
+    for r in selected:
+        prev_state = dict(r)
+        await db.reminders.update_one(
+            {"_id": r["_id"]},
+            {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc),
+                      "next_nudge_at": None}},
+        )
+        await _log_event(chat_id, "complete_reminder", "reminders", r["_id"], prev_state)
+        try:
+            from agentzero.scheduler import get_scheduler
 
-        get_scheduler().remove_job(f"reminder:{best['_id']}")
-    except Exception:
-        pass
-    return f'Nice — marked "{best["text"]}" done. I\'ll stop nagging.'
+            get_scheduler().remove_job(f"reminder:{r['_id']}")
+        except Exception:
+            pass
+
+    if len(selected) == 1:
+        return f'Nice — marked "{selected[0]["text"]}" done. I\'ll stop nagging.'
+    listed = "; ".join(r["text"] for r in selected)
+    return f"Marked {len(selected)} reminders done: {listed}. I'll stop nagging."
 
 
 async def _cancel_reminder(chat_id: int, args: dict) -> str:
     db = get_db()
     query = args["query"]
+    # Include awaiting_ack — a reminder that has already FIRED and is nagging must be
+    # cancellable too, not just not-yet-fired ones.
     one_offs = await db.reminders.find(
-        {"chat_id": chat_id, "status": "pending"}
+        {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
     ).to_list(None)
     recurring = await db.recurring_reminders.find(
         {"chat_id": chat_id, "active": True}
     ).to_list(None)
     if not one_offs and not recurring:
-        return "No upcoming reminders to cancel."
+        return "No active reminders to cancel."
 
-    # Pick the best match across both one-off and recurring reminders.
-    candidates = [("one_off", r) for r in one_offs] + [("recurring", r) for r in recurring]
-    kind, best = max(candidates, key=lambda c: _sim(query, c[1]["text"]))
-    if _sim(query, best["text"]) < 0.3:
-        return f'No reminder matching "{query}".'
+    items = [("one_off", r) for r in one_offs] + [("recurring", r) for r in recurring]
+    scored = [(kind, r, _reminder_score(query, r["text"])) for kind, r in items]
+    strong = [(kind, r) for kind, r, s in scored if s >= 0.5]
+    if not strong:
+        bk, br, bs = max(scored, key=lambda x: x[2])
+        if bs < 0.34:
+            return f'No reminder matching "{query}".'
+        strong = [(bk, br)]
 
-    if kind == "recurring":
-        await db.recurring_reminders.update_one(
-            {"_id": best["_id"]}, {"$set": {"active": False}}
-        )
-        job_id = f"recurring:{best['_id']}"
-    else:
-        await db.reminders.update_one(
-            {"_id": best["_id"]}, {"$set": {"status": "cancelled"}}
-        )
-        job_id = f"reminder:{best['_id']}"
-    try:
-        from agentzero.scheduler import get_scheduler
+    cancelled: list[str] = []
+    for kind, r in strong:
+        if kind == "recurring":
+            await db.recurring_reminders.update_one(
+                {"_id": r["_id"]}, {"$set": {"active": False}}
+            )
+            job_id = f"recurring:{r['_id']}"
+        else:
+            prev_state = dict(r)
+            await db.reminders.update_one(
+                {"_id": r["_id"]}, {"$set": {"status": "cancelled", "next_nudge_at": None}}
+            )
+            await _log_event(chat_id, "cancel_reminder", "reminders", r["_id"], prev_state)
+            job_id = f"reminder:{r['_id']}"
+        try:
+            from agentzero.scheduler import get_scheduler
 
-        get_scheduler().remove_job(job_id)
-    except Exception:
-        pass
-    label = "recurring reminder" if kind == "recurring" else "reminder"
-    return f'Cancelled {label}: "{best["text"]}".'
+            get_scheduler().remove_job(job_id)
+        except Exception:
+            pass
+        cancelled.append(r["text"])
+
+    if len(cancelled) == 1:
+        return f'Cancelled: "{cancelled[0]}".'
+    return f"Cancelled {len(cancelled)} reminders: {'; '.join(cancelled)}."
 
 
 async def _snooze_reminder(chat_id: int, args: dict) -> str:
@@ -618,7 +667,8 @@ async def complete_reminder_by_id(chat_id: int, rid: str) -> str:
         return "Already handled."
     prev = dict(r)
     await db.reminders.update_one(
-        {"_id": oid}, {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc)}}
+        {"_id": oid},
+        {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc), "next_nudge_at": None}},
     )
     await _log_event(chat_id, "complete_reminder", "reminders", oid, prev)
     try:

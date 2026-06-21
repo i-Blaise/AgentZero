@@ -110,10 +110,15 @@ def _reminder_buttons(reminder_id: str) -> list[tuple[str, str]]:
 
 async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
     try:
-        await send(chat_id, await _phrase_reminder(text), buttons=_reminder_buttons(reminder_id))
         db = get_db()
+        # Guard: never resurrect a reminder the user already closed. If a stale/duplicate
+        # job fires for one that's been completed or cancelled, do nothing.
+        current = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
+        if current and current.get("status") not in ("pending", None):
+            return
         now = datetime.now(timezone.utc)
         gap = await _followup_minutes(chat_id)
+        await send(chat_id, await _phrase_reminder(text), buttons=_reminder_buttons(reminder_id))
         # Don't mark done — await the user's confirmation. It moves to awaiting_ack
         # and the follow-up loop keeps nudging until the user says it's handled.
         await db.reminders.update_one(

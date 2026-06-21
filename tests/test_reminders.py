@@ -248,6 +248,70 @@ async def test_set_reminder_cadence_persists_and_clamps(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_complete_matches_partial_phrase(mock_db):
+    """The real bug: a partial phrase must match a long reminder and actually close it."""
+    now = datetime.now(timezone.utc)
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID,
+         "text": "Continue with the Gyacity website and add images sent by Brown on Snapchat",
+         "fire_at": now, "status": "awaiting_ack", "created_at": now, "next_nudge_at": now}
+    )).inserted_id
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("complete_reminder", query="gyacity images from brown"))
+    assert "done" in result.lower()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "done"
+    assert doc["next_nudge_at"] is None  # cleared, so the nudge loop can't resurrect it
+
+
+@pytest.mark.asyncio
+async def test_complete_clears_all_duplicates(mock_db):
+    now = datetime.now(timezone.utc)
+    for _ in range(3):
+        await mock_db.reminders.insert_one(
+            {"chat_id": CHAT_ID, "text": "send the weekly report", "fire_at": now,
+             "status": "awaiting_ack", "created_at": now, "next_nudge_at": now}
+        )
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("complete_reminder", query="weekly report"))
+    assert "3 reminders" in result
+    assert await mock_db.reminders.count_documents({"chat_id": CHAT_ID, "status": "done"}) == 3
+
+
+@pytest.mark.asyncio
+async def test_cancel_reminder_kills_awaiting_ack(mock_db):
+    """'remove that reminder' must work on a reminder that's already firing/nagging."""
+    now = datetime.now(timezone.utc)
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "call the dentist", "fire_at": now,
+         "status": "awaiting_ack", "created_at": now, "next_nudge_at": now}
+    )).inserted_id
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("cancel_reminder", query="dentist"))
+    assert "cancelled" in result.lower()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "cancelled"
+    assert doc["next_nudge_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_fire_reminder_does_not_resurrect_closed(mock_db):
+    """A stale job firing for an already-done reminder must NOT re-open it."""
+    from agentzero import scheduler
+
+    now = datetime.now(timezone.utc)
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "already done", "fire_at": now,
+         "status": "done", "created_at": now}
+    )).inserted_id
+    with patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._fire_reminder(str(rid), CHAT_ID, "already done")
+    mock_send.assert_not_called()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "done"  # unchanged
+
+
+@pytest.mark.asyncio
 async def test_cancel_reminder(mock_db):
     with patch("agentzero.scheduler.schedule_reminder"):
         await execute_tool(CHAT_ID, _tc("set_reminder", text="dentist appointment", fire_at=_future_local(60)))
