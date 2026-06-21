@@ -189,6 +189,74 @@ async def test_sent_non_application_ignored(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_reply_captures_message_body(mock_db):
+    """A reply scan stores the email body (quoted history stripped) + last_message_* fields."""
+    await mock_db.system_state.insert_one({"chat_id": CHAT_ID, "last_app_scan_uid": "101"})
+    await mock_db.applications.insert_one(
+        {"chat_id": CHAT_ID, "company": "Acme", "role": "Backend Engineer", "status": "applied",
+         "applied_at": datetime.now(timezone.utc), "last_update_at": datetime.now(timezone.utc),
+         "stale_notified": False, "created_at": datetime.now(timezone.utc)}
+    )
+    email = _email("102", "Jane Recruiter <jane@acme.com>", "Interview invitation",
+                   date="2026-06-20 09:00")
+    email["body"] = "Hi Blaise, we'd love to interview you next week.\n\nOn Mon, you wrote:\n> my old application text"
+    prov = _provider([{"uid": "102", "category": "update", "company": "Acme", "role": "", "new_status": "interview"}])
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[]), \
+         patch("agentzero.yahoo_mail.fetch_recent", new=AsyncMock(return_value=[email])), \
+         patch("agentzero.applications.get_provider", return_value=prov):
+        await applications.scan_inbox(CHAT_ID)
+
+    app = await mock_db.applications.find_one({"chat_id": CHAT_ID, "company": "Acme"})
+    assert app["last_message_direction"] == "inbound"
+    assert app["last_message_from"] == "Jane Recruiter <jane@acme.com>"
+    assert "interview you next week" in app["last_message_body"]
+    assert "my old application text" not in app["last_message_body"]  # quoted reply stripped
+    assert len(app["messages"]) == 1
+
+
+def test_serialize_includes_last_message_fields():
+    from bson import ObjectId
+    now = datetime(2026, 6, 20, 9, 0, tzinfo=timezone.utc)
+    doc = {"_id": ObjectId(), "company": "Acme", "role": "BE", "status": "interview", "source": "yahoo",
+           "last_message_body": "We'd love to interview you.", "last_message_snippet": "We'd love to interview you.",
+           "last_message_from": "Jane <jane@acme.com>", "last_message_direction": "inbound", "last_message_at": now,
+           "messages": [{"from": "Jane", "direction": "inbound", "sent_at": now, "body": "We'd love to interview you."}]}
+    out = applications.serialize_application(doc)
+    assert out["last_message_direction"] == "inbound"
+    assert out["last_message_from"] == "Jane <jane@acme.com>"
+    assert out["last_message_at"].startswith("2026-06-20")
+    assert out["messages"][0]["body"] == "We'd love to interview you."
+
+
+def test_serialize_message_fields_null_when_absent():
+    from bson import ObjectId
+    out = applications.serialize_application({"_id": ObjectId(), "company": "X", "status": "applied", "source": "manual"})
+    assert out["last_message_body"] is None
+    assert out["last_message_snippet"] is None
+    assert out["last_message_at"] is None
+    assert "messages" not in out  # omitted, not null — keeps it additive/clean
+
+
+@pytest.mark.asyncio
+async def test_backfill_populates_from_imap(mock_db):
+    await mock_db.applications.insert_one(
+        {"chat_id": CHAT_ID, "company": "Acme", "role": "BE", "status": "interview",
+         "source": "Interview invitation - Acme", "last_email_uid": "102",
+         "applied_at": datetime.now(timezone.utc)}
+    )
+    acct = {"source": "yahoo", "host": "h", "user": "u", "password": "p", "sent_folder": "Sent"}
+    email = {"uid": "102", "from": "Jane <jane@acme.com>", "to": "me", "subject": "Interview",
+             "date": "2026-06-20 09:00", "snippet": "...", "body": "We'd love to interview you."}
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[acct]), \
+         patch("agentzero.imap_mail.read_uid", new=AsyncMock(return_value=email)):
+        n = await applications.backfill_application_messages(CHAT_ID)
+    assert n == 1
+    app = await mock_db.applications.find_one({"chat_id": CHAT_ID, "company": "Acme"})
+    assert "interview you" in app["last_message_body"]
+    assert app["last_message_direction"] == "inbound"
+
+
+@pytest.mark.asyncio
 async def test_stale_followup_flagged_once(mock_db):
     await mock_db.applications.insert_one(
         {"chat_id": CHAT_ID, "company": "GhostCorp", "role": "", "status": "applied",

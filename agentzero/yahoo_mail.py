@@ -161,13 +161,15 @@ def _sync_fetch_recent(folder: str, limit: int, since_uid: str | None) -> list[d
                     date = parsedate_to_datetime(msg["Date"]).strftime("%Y-%m-%d %H:%M")
                 except Exception:
                     date = _decode(msg.get("Date"))
+            full_body = _extract_body(msg)
             out.append(
                 {
                     "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
                     "from": _decode(msg.get("From")),
                     "subject": _decode(msg.get("Subject")) or "(no subject)",
                     "date": date,
-                    "snippet": _extract_body(msg)[:600],
+                    "snippet": full_body[:600],
+                    "body": full_body[:10000],
                 }
             )
         return out

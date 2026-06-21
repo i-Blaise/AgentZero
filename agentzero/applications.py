@@ -54,6 +54,74 @@ def _pick_cv(attachments: list[str]) -> str:
     return attachments[0]
 
 
+_QUOTE_PATTERNS = [
+    r"\nOn .{0,160}wrote:",            # "On Mon, ... <x> wrote:"
+    r"\n-{2,}\s*Original Message\s*-{2,}",
+    r"\nFrom:.{0,160}\nSent:",          # Outlook-style quoted header
+    r"\n_{5,}",
+    r"\n>{1,}\s",                        # quoted lines
+]
+
+
+def _strip_quoted(text: str) -> str:
+    """Best-effort: drop quoted reply history / forwarded headers so we keep the new message."""
+    if not text:
+        return ""
+    cut = len(text)
+    for pat in _QUOTE_PATTERNS:
+        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            cut = min(cut, m.start())
+    return text[:cut].strip()
+
+
+def _parse_email_dt(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+async def _attach_message(chat_id: int, app_id, email: dict, direction: str) -> None:
+    """Record the email that touched an application onto its `messages` thread + last_message_*
+    fields, so the dashboard can act on what was actually said (not just the subject)."""
+    db = get_db()
+    if not email:
+        return
+    uid = str(email.get("uid") or "")
+    body = _strip_quoted(email.get("body") or email.get("snippet") or "")
+    msg = {
+        "from": email.get("from") or "",
+        "direction": direction,
+        "sent_at": _parse_email_dt(email.get("date")),
+        "body": body,
+        "uid": uid,
+    }
+    app = await db.applications.find_one({"_id": app_id})
+    if not app:
+        return
+    msgs = list(app.get("messages") or [])
+    if not any(m.get("uid") == uid and m.get("direction") == direction for m in msgs):
+        msgs.append(msg)
+        msgs = msgs[-15:]  # keep the thread bounded
+    latest = max(msgs, key=lambda m: _aware(m.get("sent_at")) or datetime.min.replace(tzinfo=timezone.utc))
+    await db.applications.update_one(
+        {"_id": app_id},
+        {"$set": {
+            "messages": msgs,
+            "last_message_body": latest.get("body"),
+            "last_message_snippet": (latest.get("body") or "")[:200] or None,
+            "last_message_from": latest.get("from"),
+            "last_message_direction": latest.get("direction"),
+            "last_message_at": latest.get("sent_at"),
+        }},
+    )
+
+
 def _aware(dt):
     if dt is None:
         return None
@@ -284,6 +352,7 @@ async def scan_inbox(chat_id: int) -> dict:
             doc, created = await upsert_application(
                 chat_id, company, role, "applied", source=src, uid=uid
             )
+            await _attach_message(chat_id, doc["_id"], by_uid.get(uid, {}), "inbound")
             if created:
                 new_docs.append(doc)
         elif cat == "update" and company:
@@ -293,6 +362,7 @@ async def scan_inbox(chat_id: int) -> dict:
             doc, created = await upsert_application(
                 chat_id, company, role, status, source=src, uid=uid
             )
+            await _attach_message(chat_id, doc["_id"], by_uid.get(uid, {}), "inbound")
             updates.append((doc, status, created))
 
     await _set_last_scan_uid(chat_id, max_uid)
@@ -333,10 +403,45 @@ async def scan_sent(chat_id: int) -> list[dict]:
                 chat_id, company, (r.get("role") or "").strip(), "applied",
                 source=f"{source}:sent", uid=uid, cv_used=cv_used,
             )
+            await _attach_message(chat_id, doc["_id"], by_uid.get(uid, {}), "outbound")
             if created:
                 new_tracked.append(doc)
         await _set_sent_cursor(chat_id, source, max_uid)
     return new_tracked
+
+
+async def backfill_application_messages(chat_id: int) -> int:
+    """One-off: for each tracked application without captured message content, fetch the most
+    recent email (by last_email_uid) and attach it. Returns how many were populated.
+    Folder/direction are derived: ':sent' source → that account's Sent (outbound); otherwise
+    it came from the Yahoo job inbox (inbound)."""
+    from agentzero import imap_mail
+
+    db = get_db()
+    accounts = {a["source"]: a for a in imap_mail.mail_accounts()}
+    populated = 0
+    for app in await db.applications.find({"chat_id": chat_id}).to_list(None):
+        if app.get("last_message_body"):
+            continue
+        uid = app.get("last_email_uid")
+        src = app.get("source", "") or ""
+        if not uid or src == "manual":
+            continue
+        if src.endswith(":sent"):
+            acct = accounts.get(src.split(":")[0])
+            folder = acct.get("sent_folder", "Sent") if acct else "Sent"
+            direction = "outbound"
+        else:
+            acct = accounts.get("yahoo")  # inbox-tracked apps come from the Yahoo job inbox
+            folder, direction = "INBOX", "inbound"
+        if not acct:
+            continue
+        email = await imap_mail.read_uid(acct, folder, str(uid))
+        if not email:
+            continue
+        await _attach_message(chat_id, app["_id"], email, direction)
+        populated += 1
+    return populated
 
 
 # ---------------------------------------------------------------------------
@@ -441,11 +546,16 @@ async def query_applications(chat_id: int, status: str | None = None) -> list[di
     return rows
 
 
+def _iso(dt) -> str | None:
+    dt = _aware(dt)
+    return dt.isoformat() if dt else None
+
+
 def serialize_application(doc: dict) -> dict:
     applied = _aware(doc.get("applied_at"))
     updated = _aware(doc.get("last_update_at"))
     src = doc.get("source", "")
-    return {
+    out = {
         "id": str(doc.get("_id")),
         "company": doc.get("company"),
         "title": doc.get("role") or "",
@@ -458,7 +568,28 @@ def serialize_application(doc: dict) -> dict:
         "mailbox_url": _mailbox_url(src, doc.get("company", "")),
         "cv_used": doc.get("cv_used") or "",
         "notes": doc.get("notes") or "",
+        # Most-recent message content (additive; null when not captured yet).
+        "last_message_body": doc.get("last_message_body"),
+        "last_message_snippet": doc.get("last_message_snippet"),
+        "last_message_from": doc.get("last_message_from"),
+        "last_message_direction": doc.get("last_message_direction"),
+        "last_message_at": _iso(doc.get("last_message_at")),
     }
+    msgs = doc.get("messages")
+    if msgs:
+        msgs_sorted = sorted(
+            msgs, key=lambda m: _aware(m.get("sent_at")) or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        out["messages"] = [
+            {
+                "from": m.get("from"),
+                "direction": m.get("direction"),
+                "sent_at": _iso(m.get("sent_at")),
+                "body": m.get("body"),
+            }
+            for m in msgs_sorted
+        ]
+    return out
 
 
 def status_counts(rows: list[dict]) -> dict:

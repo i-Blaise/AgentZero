@@ -120,9 +120,15 @@ Routes (all scoped to `ALLOWED_CHAT_ID`): `GET /api/health`, `/api/expenses`
 (`period|start|end|category|limit`), `/api/expenses/summary`, `/api/expenses/timeseries`
 (`bucket=day|week|month`), `/api/expenses/categories`, and `/api/applications` (optional
 `status` filter) → `{count, by_status, cv_on_file, applications:[{id, company, title, status,
-status_label, applied_at, last_update_at, source, mailbox, mailbox_url, cv_used, notes}]}`.
+status_label, applied_at, last_update_at, source, mailbox, mailbox_url, cv_used, notes,
+last_message_body, last_message_snippet, last_message_from, last_message_direction (inbound|outbound),
+last_message_at, and optional messages[]}]}`.
 `mailbox_url` is a webmail deep *search* link (IMAP has no stable per-message URL); `cv_used` is
-the attached CV filename captured from sent applications; `cv_on_file` is the profile CV. `period` is today|week|month|all; explicit
+the attached CV filename captured from sent applications; `cv_on_file` is the profile CV.
+Message content is captured at scan time onto the application (`_attach_message`: full plain-text body,
+quoted history stripped, capped 10k; thread kept to last 15) so the API never hits IMAP live.
+`applications.backfill_application_messages()` fills message content for pre-existing apps via
+`last_email_uid` (folder/direction derived: `:sent`→that account's Sent/outbound, else Yahoo inbox/inbound). `period` is today|week|month|all; explicit
 `start`/`end` ISO dates override it. Amounts are grouped per currency (never summed across).
 
 ## Yahoo Mail — read-only (IMAP)

@@ -71,6 +71,7 @@ def _fetch_uid_list(M: imaplib.IMAP4_SSL, uids: list) -> list[dict]:
                     fn = part.get_filename()
                     if fn:
                         attachments.append(_decode(fn))
+        full_body = _extract_body(msg)
         out.append(
             {
                 "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
@@ -78,7 +79,8 @@ def _fetch_uid_list(M: imaplib.IMAP4_SSL, uids: list) -> list[dict]:
                 "to": _decode(msg.get("To")),
                 "subject": _decode(msg.get("Subject")) or "(no subject)",
                 "date": date,
-                "snippet": _extract_body(msg)[:700],
+                "snippet": full_body[:700],
+                "body": full_body[:10000],
                 "attachments": attachments,
             }
         )
@@ -143,6 +145,31 @@ async def fetch_recent(
     except Exception:
         logger.exception("IMAP fetch_recent failed for %s", account.get("source"))
         return []
+
+
+def _sync_read_uid(host: str, user: str, password: str, folder: str, uid: str) -> dict | None:
+    M = imaplib.IMAP4_SSL(host, 993)
+    M.login(user, password)
+    try:
+        M.select(folder, readonly=True)
+        out = _fetch_uid_list(M, [uid.encode() if isinstance(uid, str) else uid])
+        return out[0] if out else None
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+async def read_uid(account: dict, folder: str, uid: str) -> dict | None:
+    """Read one message by uid from a given account+folder. None on error/not found."""
+    try:
+        return await asyncio.to_thread(
+            _sync_read_uid, account["host"], account["user"], account["password"], folder, str(uid)
+        )
+    except Exception:
+        logger.exception("IMAP read_uid failed for %s/%s", account.get("source"), folder)
+        return None
 
 
 async def fetch_since(account: dict, days: int = 30, limit: int = 600) -> list[dict]:
