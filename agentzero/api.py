@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from agentzero import applications, expenses
+from agentzero import applications, board, expenses
 from agentzero.config import ALLOWED_CHAT_ID, DASHBOARD_API_KEY
 
 
@@ -108,3 +108,32 @@ async def api_applications(status: str | None = None) -> dict:
         "cv_on_file": await applications.profile_cv(ALLOWED_CHAT_ID),
         "applications": [applications.serialize_application(r) for r in rows],
     }
+
+
+# --- Tasks & reminders (the board) ------------------------------------------
+
+@router.get("/tasks")
+async def api_tasks(status: str | None = None, scope: str | None = None) -> dict:
+    items = await board.query_tasks(status, scope)
+    return {
+        "count": len(items),
+        "by_status": board.task_status_counts([t for t, _ in items]),
+        "tasks": [board.serialize_task(t, p) for t, p in items],
+    }
+
+
+@router.get("/reminders")
+async def api_reminders(status: str | None = None) -> dict:
+    rows = await board.query_reminders(ALLOWED_CHAT_ID, status)
+    recurring = await board.query_recurring(ALLOWED_CHAT_ID)
+    return {
+        "count": len(rows),
+        "by_status": board.reminder_status_counts(rows),
+        "reminders": [board.serialize_reminder(r) for r in rows],
+        "recurring": [board.serialize_recurring(r) for r in recurring],
+    }
+
+
+@router.get("/overview")
+async def api_overview() -> dict:
+    return await board.overview(ALLOWED_CHAT_ID)

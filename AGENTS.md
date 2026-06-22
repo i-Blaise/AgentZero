@@ -131,7 +131,11 @@ quoted history stripped, capped 10k; thread kept to last 15) so the API never hi
 latest inbound body — null for outbound/auto-acks/dead-end rejections, null on LLM error, never raises);
 the API just serializes the stored value.
 `applications.backfill_application_messages()` fills message content for pre-existing apps via
-`last_email_uid` (folder/direction derived: `:sent`→that account's Sent/outbound, else Yahoo inbox/inbound). `period` is today|week|month|all; explicit
+`last_email_uid` (folder/direction derived: `:sent`→that account's Sent/outbound, else Yahoo inbox/inbound).
+Board endpoints (`board.py`): `/api/tasks` (`status`/`scope` filters → `{count, by_status, tasks[]}`,
+each task with project/scope/status/due_date/is_overdue), `/api/reminders` (`status` filter →
+`{count, by_status, reminders[], recurring[]}`), `/api/overview` (`{tasks, reminders, projects}` count
+rollup). `period` is today|week|month|all; explicit
 `start`/`end` ISO dates override it. Amounts are grouped per currency (never summed across).
 
 ## Yahoo Mail — read-only (IMAP)
@@ -208,6 +212,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `expenses.py` | Expense tracking — scans receipts across mailboxes, LLM-extracts merchant/amount/currency/category into the `expenses` collection, summaries + weekly digest. Also the structured data access (`query_range`/`serialize_expense`/`summary_data`/`timeseries_data`) behind the dashboard API. |
 | `api.py` | Read-only dashboard JSON API mounted at `/api` (expenses + applications). Gated by `DASHBOARD_API_KEY` (X-API-Key header); 404 when unset. |
 | `user_model.py` | Self-updating user model — daily LLM reflection over memory + activity → an evolving WHO/WORKING-ON/GOALS/PATTERNS summary stored on `profile.user_model`, injected into every prompt. |
+| `board.py` | Structured read access to tasks + reminders for the dashboard API (query/serialize/counts + overview rollup). |
 | `audio.py` | Whisper voice transcription (always OpenAI) |
 | `telegram_io.py` | `send()` with 4096-char splitting |
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
