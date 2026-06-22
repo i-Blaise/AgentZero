@@ -26,6 +26,13 @@ def _provider(results):
     return prov
 
 
+def _provider_raw(text):
+    """Provider whose chat() returns a raw string (for the suggested_action JSON)."""
+    prov = MagicMock()
+    prov.chat = AsyncMock(return_value=text)
+    return prov
+
+
 @pytest.mark.asyncio
 async def test_first_scan_sets_baseline_only(mock_db):
     """First run must NOT classify history — just set a forward baseline."""
@@ -235,6 +242,79 @@ def test_serialize_message_fields_null_when_absent():
     assert out["last_message_snippet"] is None
     assert out["last_message_at"] is None
     assert "messages" not in out  # omitted, not null — keeps it additive/clean
+
+
+@pytest.mark.asyncio
+async def test_suggested_action_actionable(mock_db):
+    payload = {"actionable": True, "headline": "Propose Tue/Wed PM for the interview",
+               "summary": "Acme invited you to a 45-min technical interview next week.",
+               "steps": ["Reply with Tue or Wed afternoon", "Confirm the timezone"], "priority": "high"}
+    with patch("agentzero.applications.get_provider", return_value=_provider_raw(json.dumps(payload))):
+        out = await applications._suggested_action(
+            "We'd love to interview you next week — Tue or Wed?", "inbound", "jane@acme.com")
+    assert out["headline"].startswith("Propose")
+    assert out["priority"] == "high"
+    assert out["steps"][0].startswith("Reply")
+    assert out["generated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_suggested_action_none_for_outbound_and_acks(mock_db):
+    # outbound → no LLM call, no action
+    prov = _provider_raw('{"actionable": true, "headline": "x"}')
+    with patch("agentzero.applications.get_provider", return_value=prov):
+        assert await applications._suggested_action("we sent this", "outbound", "me") is None
+    prov.chat.assert_not_called()
+    # inbound auto-ack → LLM says not actionable → None
+    with patch("agentzero.applications.get_provider", return_value=_provider_raw('{"actionable": false}')):
+        out = await applications._suggested_action("We acknowledge receipt of your application.", "inbound", "noreply@x.com")
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_suggested_action_none_on_llm_error(mock_db):
+    prov = MagicMock()
+    prov.chat = AsyncMock(side_effect=RuntimeError("api down"))
+    with patch("agentzero.applications.get_provider", return_value=prov):
+        out = await applications._suggested_action("real interview invite", "inbound", "jane@acme.com")
+    assert out is None  # never throws
+
+
+def test_serialize_includes_suggested_action():
+    from bson import ObjectId
+    now = datetime(2026, 6, 20, 9, 0, tzinfo=timezone.utc)
+    doc = {"_id": ObjectId(), "company": "Acme", "status": "interview", "source": "yahoo",
+           "suggested_action": {"headline": "Propose times", "summary": "They invited you.",
+                                "steps": ["Reply with availability"], "priority": "high", "generated_at": now}}
+    out = applications.serialize_application(doc)
+    assert out["suggested_action"]["headline"] == "Propose times"
+    assert out["suggested_action"]["priority"] == "high"
+    assert out["suggested_action"]["generated_at"].startswith("2026-06-20")
+    # absent → null
+    bare = applications.serialize_application({"_id": ObjectId(), "company": "X", "status": "applied", "source": "manual"})
+    assert bare["suggested_action"] is None
+
+
+@pytest.mark.asyncio
+async def test_backfill_generates_action_for_bodied_app(mock_db):
+    """An app that already has a body but no action gets one generated (no IMAP re-fetch)."""
+    await mock_db.applications.insert_one(
+        {"chat_id": CHAT_ID, "company": "Acme", "status": "interview", "source": "subject",
+         "last_email_uid": "5", "last_message_body": "We'd love to interview you Tue/Wed.",
+         "last_message_direction": "inbound", "last_message_from": "jane@acme.com",
+         "applied_at": datetime.now(timezone.utc)}
+    )
+    import json
+    payload = json.dumps({"actionable": True, "headline": "Confirm interview slot",
+                          "summary": "They want to interview you.", "steps": ["Reply Tue/Wed"], "priority": "high"})
+    with patch("agentzero.imap_mail.mail_accounts", return_value=[]), \
+         patch("agentzero.imap_mail.read_uid", new=AsyncMock()) as rd, \
+         patch("agentzero.applications.get_provider", return_value=_provider_raw(payload)):
+        n = await applications.backfill_application_messages(CHAT_ID)
+    rd.assert_not_awaited()  # body present → no email re-fetch
+    assert n == 1
+    app = await mock_db.applications.find_one({"chat_id": CHAT_ID, "company": "Acme"})
+    assert app["suggested_action"]["headline"] == "Confirm interview slot"
 
 
 @pytest.mark.asyncio

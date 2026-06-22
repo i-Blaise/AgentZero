@@ -86,6 +86,45 @@ def _parse_email_dt(s: str | None) -> datetime | None:
     return None
 
 
+async def _suggested_action(body: str | None, direction: str | None, sender: str | None) -> dict | None:
+    """LLM-suggested next action from the latest EMPLOYER message. None when there's nothing to
+    act on (outbound, automated acks/no-reply, dead-end rejections) or on any error. Never raises."""
+    body = (body or "").strip()
+    if direction != "inbound" or not body:
+        return None  # we're waiting on them, or nothing to read — no action
+    system = (
+        "You advise a job applicant on their single best NEXT ACTION given the latest message an "
+        "EMPLOYER sent them. Return ONLY JSON.\n"
+        "If the message is an automated 'application received' acknowledgement, a no-reply/FYI "
+        "notification, or a rejection with no follow-up value → {\"actionable\": false}.\n"
+        "If there IS something worth doing (schedule/confirm an interview, send requested info or "
+        "documents, complete an assessment, answer a question, respond to an offer) → "
+        '{"actionable": true, "headline": "<short imperative>", "summary": "<1-2 sentences grounded '
+        'in the email>", "steps": ["concrete step", ...], "priority": "high|normal|low"}.\n'
+        "Ground everything strictly in the actual message; do not invent dates, names, or requirements."
+    )
+    user = f"From: {sender or '(unknown)'}\n\nMessage:\n{body[:4000]}"
+    try:
+        raw = await get_provider().chat([{"role": "user", "content": user}], system)
+    except Exception:
+        logger.exception("suggested_action generation failed")
+        return None
+    data = _parse_json(raw)
+    if not isinstance(data, dict) or not data.get("actionable"):
+        return None
+    headline = (data.get("headline") or "").strip()
+    if not headline:
+        return None
+    pri = data.get("priority")
+    return {
+        "headline": headline,
+        "summary": (data.get("summary") or "").strip() or None,
+        "steps": [s.strip() for s in (data.get("steps") or []) if isinstance(s, str) and s.strip()][:6],
+        "priority": pri if pri in ("high", "normal", "low") else "normal",
+        "generated_at": datetime.now(timezone.utc),
+    }
+
+
 async def _attach_message(chat_id: int, app_id, email: dict, direction: str) -> None:
     """Record the email that touched an application onto its `messages` thread + last_message_*
     fields, so the dashboard can act on what was actually said (not just the subject)."""
@@ -109,6 +148,7 @@ async def _attach_message(chat_id: int, app_id, email: dict, direction: str) -> 
         msgs.append(msg)
         msgs = msgs[-15:]  # keep the thread bounded
     latest = max(msgs, key=lambda m: _aware(m.get("sent_at")) or datetime.min.replace(tzinfo=timezone.utc))
+    action = await _suggested_action(latest.get("body"), latest.get("direction"), latest.get("from"))
     await db.applications.update_one(
         {"_id": app_id},
         {"$set": {
@@ -118,6 +158,7 @@ async def _attach_message(chat_id: int, app_id, email: dict, direction: str) -> 
             "last_message_from": latest.get("from"),
             "last_message_direction": latest.get("direction"),
             "last_message_at": latest.get("sent_at"),
+            "suggested_action": action,
         }},
     )
 
@@ -421,7 +462,20 @@ async def backfill_application_messages(chat_id: int) -> int:
     accounts = {a["source"]: a for a in imap_mail.mail_accounts()}
     populated = 0
     for app in await db.applications.find({"chat_id": chat_id}).to_list(None):
-        if app.get("last_message_body"):
+        has_body = bool(app.get("last_message_body"))
+        has_action = "suggested_action" in app
+        if has_body and has_action:
+            continue
+        if has_body and not has_action:
+            # Body already captured earlier — just generate the suggested action from stored fields.
+            action = await _suggested_action(
+                app.get("last_message_body"), app.get("last_message_direction"),
+                app.get("last_message_from"),
+            )
+            await db.applications.update_one(
+                {"_id": app["_id"]}, {"$set": {"suggested_action": action}}
+            )
+            populated += 1
             continue
         uid = app.get("last_email_uid")
         src = app.get("source", "") or ""
@@ -439,7 +493,7 @@ async def backfill_application_messages(chat_id: int) -> int:
         email = await imap_mail.read_uid(acct, folder, str(uid))
         if not email:
             continue
-        await _attach_message(chat_id, app["_id"], email, direction)
+        await _attach_message(chat_id, app["_id"], email, direction)  # also generates the action
         populated += 1
     return populated
 
@@ -575,6 +629,10 @@ def serialize_application(doc: dict) -> dict:
         "last_message_direction": doc.get("last_message_direction"),
         "last_message_at": _iso(doc.get("last_message_at")),
     }
+    sa = doc.get("suggested_action")
+    out["suggested_action"] = (
+        {**sa, "generated_at": _iso(sa.get("generated_at"))} if isinstance(sa, dict) else None
+    )
     msgs = doc.get("messages")
     if msgs:
         msgs_sorted = sorted(
