@@ -50,6 +50,36 @@ async def test_import_logs_spending_and_dedupes(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_alias_override_and_charity(mock_db):
+    """G→MaryJ alias overrides merchant/category deterministically; people→charity via the LLM."""
+    txns = [
+        {"merchant": "unknown", "amount": "120", "currency": "GHS", "date": "2026-06-20",
+         "ref": "REFG1", "ref_text": "G", "expense_category": "other", "description": ""},
+        {"merchant": "Felix", "amount": "50", "currency": "GHS", "date": "2026-06-21",
+         "ref": "REFF1", "ref_text": "Felix", "expense_category": "charity", "description": "sent to Felix"},
+    ]
+    with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=ATT)), \
+         patch("agentzero.statements._extract_pdf_text", return_value="G 120\nFelix 50"), \
+         patch("agentzero.statements.get_provider", return_value=_provider_txns(txns)):
+        await statements.import_momo_statement(CHAT_ID)
+
+    maryj = await mock_db.expenses.find_one({"chat_id": CHAT_ID, "merchant": "MaryJ"})
+    assert maryj is not None and maryj["category"] == "entertainment"   # alias applied
+    felix = await mock_db.expenses.find_one({"chat_id": CHAT_ID, "merchant": "Felix"})
+    assert felix is not None and felix["category"] == "charity"          # person → charity
+
+
+@pytest.mark.asyncio
+async def test_add_momo_alias(mock_db):
+    out = await execute_tool(CHAT_ID, ToolCall(name="add_momo_alias", args={"code": "K", "name": "Kofi's shop", "category": "food"}))
+    assert "kofi's shop" in out.lower()
+    aliases = await statements._load_aliases(CHAT_ID)
+    assert aliases["k"]["name"] == "Kofi's shop" and aliases["k"]["category"] == "food"
+    # built-in G→MaryJ still present
+    assert aliases["g"]["name"] == "MaryJ"
+
+
+@pytest.mark.asyncio
 async def test_import_no_attachment(mock_db):
     with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=None)):
         out = await statements.import_momo_statement(CHAT_ID)

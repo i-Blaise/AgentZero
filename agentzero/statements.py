@@ -29,6 +29,34 @@ from agentzero.llm import get_provider
 
 logger = logging.getLogger(__name__)
 
+# Built-in reference decodings (the user's shorthand). Keys are lowercased reference text.
+# `vendor` aliases are purchases; merged with any stored in profile.momo_aliases.
+_DEFAULT_ALIASES = {"g": {"name": "MaryJ", "category": "entertainment"}}
+
+
+async def _load_aliases(chat_id: int) -> dict:
+    db = get_db()
+    prof = await db.profile.find_one({"chat_id": chat_id}) or await db.profile.find_one({}) or {}
+    aliases = dict(_DEFAULT_ALIASES)
+    for code, info in (prof.get("momo_aliases") or {}).items():
+        if isinstance(info, dict) and info.get("name"):
+            aliases[str(code).strip().lower()] = {
+                "name": info["name"],
+                "category": (info.get("category") or "other"),
+            }
+    return aliases
+
+
+def _aliases_text(aliases: dict) -> str:
+    if not aliases:
+        return ""
+    lines = [
+        f"  - reference \"{code}\" means {info['name']} (a known vendor → merchant \"{info['name']}\", "
+        f"category \"{info['category']}\", INCLUDE as a purchase)"
+        for code, info in aliases.items()
+    ]
+    return "Known reference shorthands (decode these):\n" + "\n".join(lines) + "\n"
+
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
     import pdfplumber  # lazy — heavy dependency, only needed for this feature
@@ -53,21 +81,25 @@ def _chunks(text: str, size: int = 6000):
         yield "\n".join(buf)
 
 
-async def _parse_chunk(text: str) -> list[dict]:
+async def _parse_chunk(text: str, aliases: dict) -> list[dict]:
     system = (
-        "You extract SPENDING transactions from an MTN Mobile Money (MoMo) statement for an "
-        "expense tracker. The text is a list of transactions. Return ONLY money the user SPENT "
-        "on goods, services, or bills — payments to merchants/businesses, airtime/data top-ups, "
-        "bill/utility payments, and service charges/fees. EXCLUDE everything else: money "
-        "RECEIVED/credits, deposits/cash-in, cash-outs/withdrawals, reversals, and "
-        "person-to-person transfers the user SENT (a transfer to an individual is not a "
-        "purchase). When unsure whether it's a merchant payment or a personal transfer, EXCLUDE it.\n\n"
-        "For each spending transaction extract: merchant (the recipient/biller/service), amount "
-        f"(number only), currency (3-letter ISO, default {DEFAULT_CURRENCY}), date (YYYY-MM-DD), an "
-        f"expense_category from {_CATEGORIES}, ref (the MoMo transaction reference/ID if present, "
-        "for dedupe), and a short description. Return ONLY JSON, no prose: "
-        '{"transactions":[{"merchant":"","amount":"","currency":"","date":"","expense_category":"",'
-        '"ref":"","description":""}]}'
+        "You extract transactions from an MTN Mobile Money (MoMo) statement for a personal spend "
+        "tracker. INCLUDE every transaction where money LEFT the user's account (debits): payments, "
+        "purchases, airtime/data, bills, cash-outs/withdrawals, AND person-to-person transfers the "
+        "user SENT. EXCLUDE only money that came IN (credits): money received, deposits/cash-in, and "
+        "reversals — those are not spending.\n"
+        "Use each transaction's REFERENCE / narration as the main signal for who or what it was.\n"
+        "For every included transaction extract: merchant (who/what the money went to — from the "
+        f"reference/recipient), amount (number only), currency (default {DEFAULT_CURRENCY}), date "
+        "(YYYY-MM-DD), ref (the numeric MoMo transaction ID, for dedupe), ref_text (the reference/"
+        "narration the user typed, e.g. \"G\", \"Mwin\"), expense_category, and a short description.\n\n"
+        f"Categories: {_CATEGORIES}. Rules:\n"
+        "  - a transfer/send whose recipient is a PERSON'S NAME (e.g. Mwin, BM, Douglas, Felix) → "
+        "category \"charity\".\n"
+        "  - airtime/data/telecom (MTN, Telecel, etc.) → \"bills\".\n"
+        f"{_aliases_text(aliases)}"
+        'Return ONLY JSON, no prose: {"transactions":[{"merchant":"","amount":"","currency":"",'
+        '"date":"","ref":"","ref_text":"","expense_category":"","description":""}]}'
     )
     try:
         raw = await get_provider().chat([{"role": "user", "content": text}], system)
@@ -94,9 +126,10 @@ async def import_momo_statement(chat_id: int, name_substr: str = "momo") -> str:
     if not text.strip():
         return f"Read {att['filename']} but found no extractable text — it may be a scanned image rather than a text PDF."
 
+    aliases = await _load_aliases(chat_id)
     txns: list[dict] = []
     for chunk in _chunks(text):
-        txns.extend(await _parse_chunk(chunk))
+        txns.extend(await _parse_chunk(chunk, aliases))
 
     db = get_db()
     logged: list[dict] = []
@@ -109,6 +142,12 @@ async def import_momo_statement(chat_id: int, name_substr: str = "momo") -> str:
             continue
         ref = str(t.get("ref") or "").strip()
         merchant = (t.get("merchant") or "MoMo").strip()
+        cat = (t.get("expense_category") or "other").lower()
+        # Deterministic alias override: a typed reference matching a known shorthand wins.
+        alias = aliases.get((t.get("ref_text") or "").strip().lower())
+        if alias:
+            merchant = alias["name"]
+            cat = (alias.get("category") or cat).lower()
         currency = (t.get("currency") or DEFAULT_CURRENCY).strip().upper()[:3]
         spent_at = _resolve_date(t.get("date"), att.get("date"))
         if ref:
@@ -117,7 +156,6 @@ async def import_momo_statement(chat_id: int, name_substr: str = "momo") -> str:
             seen_refs.add(ref)
         elif await _is_duplicate(chat_id, merchant, amount, currency, spent_at):
             continue
-        cat = (t.get("expense_category") or "other").lower()
         doc = await _log_expense(
             chat_id,
             {

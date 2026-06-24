@@ -136,6 +136,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "delete_expense": _delete_expense,
         "check_receipts": _check_receipts,
         "import_momo_statement": _import_momo_statement,
+        "add_momo_alias": _add_momo_alias,
         "refresh_user_model": _refresh_user_model,
     }
     handler = handlers.get(tc.name)
@@ -955,6 +956,25 @@ async def _import_momo_statement(chat_id: int, args: dict) -> str:
     from agentzero.statements import import_momo_statement
 
     return await import_momo_statement(chat_id, (args.get("name") or "momo").strip() or "momo")
+
+
+async def _add_momo_alias(chat_id: int, args: dict) -> str:
+    """Teach the MoMo importer a reference shorthand → real name/category (e.g. G → MaryJ)."""
+    code = (args.get("code") or "").strip().lower()
+    name = (args.get("name") or "").strip()
+    if not code or not name:
+        return "Tell me the reference shorthand and what it means (e.g. 'G means MaryJ')."
+    category = (args.get("category") or "other").strip().lower()
+    db = get_db()
+    prof = await db.profile.find_one({"chat_id": chat_id}) or {}
+    aliases = dict(prof.get("momo_aliases") or {})
+    aliases[code] = {"name": name, "category": category}
+    await db.profile.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"momo_aliases": aliases}, "$setOnInsert": {"chat_id": chat_id}},
+        upsert=True,
+    )
+    return f'Got it — "{code}" in your MoMo references means {name} ({category}).'
 
 
 async def _delete_expense(chat_id: int, args: dict) -> str:

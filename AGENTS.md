@@ -109,9 +109,13 @@ email-sourced rows but keeps manual ones (used for a clean re-backfill). `/expen
 month summary. Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual
 add/delete work without one. The dashboard API stays read-only (no DELETE) — deletions are chat-only.
 **MoMo statement import** (`statements.import_momo_statement`, tool `import_momo_statement`): finds the
-MoMo PDF in the inbox, extracts text with `pdfplumber` (NEW dep — must be `pip install`ed in the server
-venv; the deploy restarts but may not reinstall requirements), LLM-parses **spending only** (excludes
-money received / deposits / cash-outs / P2P transfers sent), logs deduped by `momo_ref` (source `momo`).
+MoMo PDF in the inbox, extracts text with `pdfplumber` (dep — must be `pip install`ed in the server venv;
+the deploy restarts but may not reinstall requirements), LLM-parses all money-OUT (payments, bills,
+airtime, cash-outs, AND person-to-person transfers sent; excludes only money IN / deposits / reversals),
+logs deduped by `momo_ref` (source `momo`). Categorisation uses the reference NARRATION: sends to a
+person's name → `charity`; reference shorthands decode via `_DEFAULT_ALIASES` + `profile.momo_aliases`
+(e.g. `G`→MaryJ/entertainment) applied deterministically post-parse. `add_momo_alias` tool teaches new
+shorthands. `charity` is a category. (Owner reversed the earlier spending-only choice — P2P sends are now in.)
 
 ## Dashboard API (`api.py`)
 

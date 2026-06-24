@@ -471,6 +471,23 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "add_momo_alias",
+        "description": (
+            "Teach the MoMo statement importer a reference shorthand — e.g. 'G means MaryJ', "
+            "'K is Kofi's shop'. Future statement imports decode that reference to the real name "
+            "and category. Use when the user explains what a MoMo reference code stands for."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "The reference shorthand as it appears in the statement (e.g. 'G')."},
+                "name": {"type": "string", "description": "What it actually is (e.g. 'MaryJ')."},
+                "category": {"type": "string", "description": "Expense category for it (e.g. entertainment, charity, food…)."},
+            },
+            "required": ["code", "name"],
+        },
+    },
+    {
         "name": "delete_expense",
         "description": (
             "Remove a logged expense that's wrong or not actually a purchase — e.g. a bank "

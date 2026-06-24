@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _CATEGORIES = [
     "food", "transport", "shopping", "subscription", "bills",
-    "entertainment", "travel", "health", "other",
+    "entertainment", "travel", "health", "charity", "other",
 ]
 
 
