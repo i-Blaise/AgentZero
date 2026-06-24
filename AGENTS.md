@@ -108,6 +108,10 @@ purging a misread bank credit/transfer). `expenses.purge_scanned_expenses(chat_i
 email-sourced rows but keeps manual ones (used for a clean re-backfill). `/expenses` shows the
 month summary. Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual
 add/delete work without one. The dashboard API stays read-only (no DELETE) — deletions are chat-only.
+**MoMo statement import** (`statements.import_momo_statement`, tool `import_momo_statement`): finds the
+MoMo PDF in the inbox, extracts text with `pdfplumber` (NEW dep — must be `pip install`ed in the server
+venv; the deploy restarts but may not reinstall requirements), LLM-parses **spending only** (excludes
+money received / deposits / cash-outs / P2P transfers sent), logs deduped by `momo_ref` (source `momo`).
 
 ## Dashboard API (`api.py`)
 
@@ -210,6 +214,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `applications.py` | Job-application tracking — scans the inbox, LLM-classifies confirmations/replies, upserts the `applications` collection, proactively reports changes + stale follow-ups. |
 | `imap_mail.py` | Generic multi-account IMAP batch reader (`mail_accounts()` → Yahoo + Gmail; `fetch_recent(account, …)`). Read-only; reuses yahoo_mail's body/decode helpers. Used by background scanners. |
 | `expenses.py` | Expense tracking — scans receipts across mailboxes, LLM-extracts merchant/amount/currency/category into the `expenses` collection, summaries + weekly digest. Also the structured data access (`query_range`/`serialize_expense`/`summary_data`/`timeseries_data`) behind the dashboard API. |
+| `statements.py` | MoMo / mobile-money statement import — pulls the PDF from the inbox (`imap_mail.find_pdf_attachment`), extracts text (`pdfplumber`, lazy import), LLM-parses SPENDING only, logs deduped by `momo_ref` (source `momo`). Tool `import_momo_statement`. |
 | `api.py` | Read-only dashboard JSON API mounted at `/api` (expenses + applications). Gated by `DASHBOARD_API_KEY` (X-API-Key header); 404 when unset. |
 | `user_model.py` | Self-updating user model — daily LLM reflection over memory + activity → an evolving WHO/WORKING-ON/GOALS/PATTERNS summary stored on `profile.user_model`, injected into every prompt. |
 | `board.py` | Structured read access to tasks + reminders for the dashboard API (query/serialize/counts + overview rollup). |

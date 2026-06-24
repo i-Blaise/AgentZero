@@ -172,6 +172,67 @@ async def read_uid(account: dict, folder: str, uid: str) -> dict | None:
         return None
 
 
+def _sync_find_attachment(host, user, password, folder, days, name_substr):
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
+    M = imaplib.IMAP4_SSL(host, 993)
+    M.login(user, password)
+    try:
+        M.select(folder, readonly=True)
+        typ, data = M.uid("search", None, "SINCE", since)
+        if typ != "OK" or not data or not data[0]:
+            return None
+        for uid in reversed(data[0].split()):  # newest first
+            typ, md = M.uid("fetch", uid, "(BODY.PEEK[])")
+            if typ != "OK" or not md or not md[0]:
+                continue
+            msg = email.message_from_bytes(md[0][1])
+            for part in msg.walk():
+                if "attachment" not in str(part.get("Content-Disposition") or "").lower():
+                    continue
+                fn = _decode(part.get_filename() or "")
+                if fn.lower().endswith(".pdf") and name_substr.lower() in fn.lower():
+                    payload = part.get_payload(decode=True)
+                    if not payload:
+                        continue
+                    date = ""
+                    if msg.get("Date"):
+                        try:
+                            date = parsedate_to_datetime(msg["Date"]).strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            pass
+                    return {
+                        "filename": fn,
+                        "bytes": payload,
+                        "uid": uid.decode() if isinstance(uid, bytes) else str(uid),
+                        "date": date,
+                        "from": _decode(msg.get("From")),
+                    }
+        return None
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+async def find_pdf_attachment(name_substr: str = "momo", days: int = 60) -> dict | None:
+    """Find the most recent INBOX email (across configured accounts) carrying a PDF attachment
+    whose filename contains `name_substr`. Returns {filename, bytes, uid, date, from, source}."""
+    for acc in mail_accounts():
+        try:
+            res = await asyncio.to_thread(
+                _sync_find_attachment, acc["host"], acc["user"], acc["password"],
+                "INBOX", days, name_substr,
+            )
+        except Exception:
+            logger.exception("find_pdf_attachment failed for %s", acc.get("source"))
+            res = None
+        if res:
+            res["source"] = acc["source"]
+            return res
+    return None
+
+
 async def fetch_since(account: dict, days: int = 30, limit: int = 600) -> list[dict]:
     """Messages from the last `days` for one account (for historical backfill). [] on error."""
     try:

@@ -363,7 +363,7 @@ async def _handle_voice(chat_id: int, msg) -> None:
 
 # Tools slow enough (they hit the internet) to warrant a "working on it" filler. Fast local
 # tools and quick replies don't get one — a filler there just looks odd.
-_FILLER_TOOLS = {"web_search", "web_fetch"}
+_FILLER_TOOLS = {"web_search", "web_fetch", "import_momo_statement"}
 
 
 async def _handle_callback(cq) -> None:

@@ -455,6 +455,22 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "import_momo_statement",
+        "description": (
+            "Import the user's MTN Mobile Money (MoMo) statement PDF from their inbox into expense "
+            "tracking — for 'import my momo statement', 'record my mobile money statement'. It reads "
+            "the PDF, logs only the SPENDING (payments/airtime/bills, not money received or "
+            "transfers), deduped so re-imports don't double-count, and reports a summary."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Filename substring to find the PDF (default 'momo')."},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "delete_expense",
         "description": (
             "Remove a logged expense that's wrong or not actually a purchase — e.g. a bank "

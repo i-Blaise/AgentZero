@@ -135,6 +135,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "add_expense": _add_expense,
         "delete_expense": _delete_expense,
         "check_receipts": _check_receipts,
+        "import_momo_statement": _import_momo_statement,
         "refresh_user_model": _refresh_user_model,
     }
     handler = handlers.get(tc.name)
@@ -948,6 +949,12 @@ async def _add_expense(chat_id: int, args: dict) -> str:
         args.get("currency", ""), args.get("category", "other"), args.get("description", ""),
     )
     return f"💸 Logged: {doc['currency']} {doc['amount']:,.2f} at {doc['merchant']} [{doc['category']}]."
+
+
+async def _import_momo_statement(chat_id: int, args: dict) -> str:
+    from agentzero.statements import import_momo_statement
+
+    return await import_momo_statement(chat_id, (args.get("name") or "momo").strip() or "momo")
 
 
 async def _delete_expense(chat_id: int, args: dict) -> str:
