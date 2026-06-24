@@ -457,10 +457,10 @@ TOOLS: list[dict] = [
     {
         "name": "import_momo_statement",
         "description": (
-            "Import the user's MTN Mobile Money (MoMo) statement PDF from their inbox into expense "
-            "tracking — for 'import my momo statement', 'record my mobile money statement'. It reads "
-            "the PDF, logs only the SPENDING (payments/airtime/bills, not money received or "
-            "transfers), deduped so re-imports don't double-count, and reports a summary."
+            "Save the user's MTN Mobile Money (MoMo) statement PDF from their inbox — for 'import/"
+            "save my momo statement', 'record my mobile money statement'. It reads the PDF's "
+            "transaction table and saves EVERY transaction (money in and out) faithfully, with the "
+            "exact columns and unaltered values, deduped so re-imports don't duplicate."
         ),
         "parameters": {
             "type": "object",

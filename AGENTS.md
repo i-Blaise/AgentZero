@@ -109,13 +109,17 @@ email-sourced rows but keeps manual ones (used for a clean re-backfill). `/expen
 month summary. Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual
 add/delete work without one. The dashboard API stays read-only (no DELETE) — deletions are chat-only.
 **MoMo statement import** (`statements.import_momo_statement`, tool `import_momo_statement`): finds the
-MoMo PDF in the inbox, extracts text with `pdfplumber` (dep — must be `pip install`ed in the server venv;
-the deploy restarts but may not reinstall requirements), LLM-parses all money-OUT (payments, bills,
-airtime, cash-outs, AND person-to-person transfers sent; excludes only money IN / deposits / reversals),
-logs deduped by `momo_ref` (source `momo`). Categorisation uses the reference NARRATION: sends to a
-person's name → `charity`; reference shorthands decode via `_DEFAULT_ALIASES` + `profile.momo_aliases`
-(e.g. `G`→MaryJ/entertainment) applied deterministically post-parse. `add_momo_alias` tool teaches new
-shorthands. `charity` is a category. (Owner reversed the earlier spending-only choice — P2P sends are now in.)
+MoMo PDF in the inbox and saves the FULL statement FAITHFULLY into the `momo_transactions` collection.
+Uses `pdfplumber` (dep — must be `pip install`ed in the server venv; the deploy restarts but may not
+reinstall requirements) with the DEFAULT ruled-line `extract_tables()` (the PDF has grid lines → clean
+16-cell rows; the text/flatten path mangles it — don't use it). Saves EVERY transaction (money in AND
+out) verbatim: each doc = `{chat_id, source_file, statement_period, columns (exact 16 names), values
+(raw cells, None→"", wrapped cells keep \n), f_id, imported_at}`. **No LLM, no content alteration** —
+this is the canonical raw store; a categorised expense view is derived later. Dedup by `f_id` (the
+statement's own transaction ID). The columns are exactly: TRANSACTION DATE · FROM ACCT · FROM NAME ·
+FROM NO. · TRANS. TYPE · AMOUNT · FEES · E-LEVY · BAL BEFORE · BAL AFTER · TO NO. · TO NAME · TO ACCT ·
+F_ID · **REF** (the purpose narration — e.g. `G`=MaryJ, person-name=gift) · OVA. `add_momo_alias`
+(+ `_DEFAULT_ALIASES`/`profile.momo_aliases`, `charity` category) are kept for the future derived view.
 
 ## Dashboard API (`api.py`)
 
@@ -231,7 +235,7 @@ adapter translates them and manages its own native multi-turn message format ins
 `reminders`, `recurring_reminders` (cron-style repeating pings), `memory` (freeform facts),
 `system_state` (last/next proactive-nudge time, nudge cadence, `last_app_scan_uid`),
 `seen_jobs`, `applications` (tracked job applications), `expenses` (logged from receipts),
-`profile`, `disambiguation` (unused stub). `system_state` also holds per-mailbox receipt scan
+`momo_transactions` (full MoMo statement, verbatim), `profile`, `disambiguation` (unused stub). `system_state` also holds per-mailbox receipt scan
 cursors (`receipt_cursor_<source>`) and the application scan cursor (`last_app_scan_uid`).
 
 ### Tools the LLM can call

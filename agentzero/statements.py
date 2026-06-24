@@ -1,11 +1,15 @@
 """
-Mobile-money statement import (MTN MoMo PDF).
+MoMo statement import — faithful, lossless capture of the full statement.
 
-Pulls the statement PDF from the inbox, extracts the transaction text, and the LLM picks out
-SPENDING only — payments to merchants, airtime/data, bills — EXCLUDING money received,
-deposits, cash-outs, reversals, and person-to-person transfers the user sent. Each is logged
-as an expense (source "momo"), deduped by the MoMo transaction reference so re-importing the
-same statement never double-counts.
+Pulls the MoMo PDF from the inbox and extracts the transaction table EXACTLY using pdfplumber's
+ruled-line table extraction (clean, 16-column-aligned cells), saving EVERY transaction (money in
+and out) verbatim into the `momo_transactions` collection with the statement's exact column names
+and unaltered cell values. This is the canonical raw store — we can derive categorised views from
+it later (the REF column carries the purpose; aliases like G→MaryJ map onto it).
+
+Nothing here rewrites cell content: values are stored as pdfplumber returns them (None → "" for
+empty cells; wrapped multi-line cells keep their embedded newlines). Dedup is by F_ID (the
+statement's own per-transaction ID), so re-importing the same statement never duplicates.
 
 pdfplumber is imported lazily so the rest of the app doesn't depend on it.
 """
@@ -14,23 +18,16 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
+from datetime import datetime, timezone
 
-from agentzero.config import DEFAULT_CURRENCY
 from agentzero.db import get_db
-from agentzero.expenses import (
-    _CATEGORIES,
-    _is_duplicate,
-    _log_expense,
-    _parse_amount,
-    _parse_json,
-    _resolve_date,
-)
-from agentzero.llm import get_provider
 
 logger = logging.getLogger(__name__)
 
-# Built-in reference decodings (the user's shorthand). Keys are lowercased reference text.
-# `vendor` aliases are purchases; merged with any stored in profile.momo_aliases.
+_FIRST_COL = "TRANSACTION DATE"  # the header row starts with this
+
+# Reference shorthands for a future categorised view (kept here so add_momo_alias has a home).
 _DEFAULT_ALIASES = {"g": {"name": "MaryJ", "category": "entertainment"}}
 
 
@@ -41,150 +38,89 @@ async def _load_aliases(chat_id: int) -> dict:
     for code, info in (prof.get("momo_aliases") or {}).items():
         if isinstance(info, dict) and info.get("name"):
             aliases[str(code).strip().lower()] = {
-                "name": info["name"],
-                "category": (info.get("category") or "other"),
+                "name": info["name"], "category": info.get("category") or "other",
             }
     return aliases
 
 
-def _aliases_text(aliases: dict) -> str:
-    if not aliases:
-        return ""
-    lines = [
-        f"  - reference \"{code}\" means {info['name']} (a known vendor → merchant \"{info['name']}\", "
-        f"category \"{info['category']}\", INCLUDE as a purchase)"
-        for code, info in aliases.items()
-    ]
-    return "Known reference shorthands (decode these):\n" + "\n".join(lines) + "\n"
+def _cell(value) -> str:
+    """Faithful cell value — empty cells become '', everything else verbatim (newlines kept)."""
+    return "" if value is None else value
 
 
-def _extract_pdf_text(pdf_bytes: bytes) -> str:
-    import pdfplumber  # lazy — heavy dependency, only needed for this feature
+def _extract_tables(pdf_bytes: bytes) -> tuple[list[str], list[list[str]], str]:
+    """Return (columns, rows, statement_period), all verbatim from the PDF's ruled table.
+    columns = exact header names; rows = list of 16-cell lists; period = the 'From: … To: …' line."""
+    import pdfplumber  # lazy — heavy dependency
 
-    parts: list[str] = []
+    columns: list[str] = []
+    rows: list[list[str]] = []
+    period = ""
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
-            parts.append(page.extract_text() or "")
-    return "\n".join(parts)
-
-
-def _chunks(text: str, size: int = 6000):
-    buf: list[str] = []
-    cur = 0
-    for line in text.splitlines():
-        buf.append(line)
-        cur += len(line) + 1
-        if cur >= size:
-            yield "\n".join(buf)
-            buf, cur = [], 0
-    if buf:
-        yield "\n".join(buf)
-
-
-async def _parse_chunk(text: str, aliases: dict) -> list[dict]:
-    system = (
-        "You extract transactions from an MTN Mobile Money (MoMo) statement for a personal spend "
-        "tracker. INCLUDE every transaction where money LEFT the user's account (debits): payments, "
-        "purchases, airtime/data, bills, cash-outs/withdrawals, AND person-to-person transfers the "
-        "user SENT. EXCLUDE only money that came IN (credits): money received, deposits/cash-in, and "
-        "reversals — those are not spending.\n"
-        "Use each transaction's REFERENCE / narration as the main signal for who or what it was.\n"
-        "For every included transaction extract: merchant (who/what the money went to — from the "
-        f"reference/recipient), amount (number only), currency (default {DEFAULT_CURRENCY}), date "
-        "(YYYY-MM-DD), ref (the numeric MoMo transaction ID, for dedupe), ref_text (the reference/"
-        "narration the user typed, e.g. \"G\", \"Mwin\"), expense_category, and a short description.\n\n"
-        f"Categories: {_CATEGORIES}. Rules:\n"
-        "  - a transfer/send whose recipient is a PERSON'S NAME (e.g. Mwin, BM, Douglas, Felix) → "
-        "category \"charity\".\n"
-        "  - airtime/data/telecom (MTN, Telecel, etc.) → \"bills\".\n"
-        f"{_aliases_text(aliases)}"
-        'Return ONLY JSON, no prose: {"transactions":[{"merchant":"","amount":"","currency":"",'
-        '"date":"","ref":"","ref_text":"","expense_category":"","description":""}]}'
-    )
-    try:
-        raw = await get_provider().chat([{"role": "user", "content": text}], system)
-    except Exception:
-        logger.exception("MoMo statement parse failed")
-        return []
-    data = _parse_json(raw)
-    txns = data.get("transactions") if isinstance(data, dict) else None
-    return txns if isinstance(txns, list) else []
+            for table in page.extract_tables():
+                for cells in table:
+                    if not cells:
+                        continue
+                    # Banner/title row: only the first cell is populated (rest None).
+                    if cells[0] and all(c is None for c in cells[1:]):
+                        if not period:
+                            for line in str(cells[0]).splitlines():
+                                if line.strip().startswith("From:"):
+                                    period = line.strip()
+                                    break
+                        continue
+                    # Header row (repeats per page) — capture the exact column names once.
+                    if cells[0] == _FIRST_COL:
+                        if not columns:
+                            columns = [_cell(c) for c in cells]
+                        continue
+                    rows.append([_cell(c) for c in cells])
+    return columns, rows, period
 
 
 async def import_momo_statement(chat_id: int, name_substr: str = "momo") -> str:
+    """Find the MoMo PDF and save its FULL transaction table verbatim into momo_transactions."""
     from agentzero import imap_mail
 
     att = await imap_mail.find_pdf_attachment(name_substr)
     if not att:
-        return ("Couldn't find a MoMo statement PDF in your inbox (looked for a recent PDF "
-                "whose name contains 'momo'). Make sure the statement email is in the inbox.")
+        return ("Couldn't find a MoMo statement PDF in your inbox (looked for a recent PDF whose "
+                "name contains 'momo'). Make sure the statement email is in the inbox.")
     try:
-        text = await asyncio.to_thread(_extract_pdf_text, att["bytes"])
+        columns, rows, period = await asyncio.to_thread(_extract_tables, att["bytes"])
     except Exception:
-        logger.exception("PDF text extraction failed")
-        return f"Found {att['filename']} but couldn't read the PDF — it may be password-protected or corrupted."
-    if not text.strip():
-        return f"Read {att['filename']} but found no extractable text — it may be a scanned image rather than a text PDF."
+        logger.exception("MoMo table extraction failed")
+        return f"Found {att['filename']} but couldn't read the transaction table from the PDF."
+    if not columns or not rows:
+        return (f"Read {att['filename']} but couldn't extract a transaction table — it may be a "
+                "scanned image rather than a text PDF.")
 
-    aliases = await _load_aliases(chat_id)
-    txns: list[dict] = []
-    for chunk in _chunks(text):
-        txns.extend(await _parse_chunk(chunk, aliases))
-
+    fid_idx = columns.index("F_ID") if "F_ID" in columns else None
     db = get_db()
-    logged: list[dict] = []
-    seen_refs: set[str] = set()
-    for t in txns:
-        if not isinstance(t, dict):
+    saved = 0
+    skipped = 0
+    for cells in rows:
+        fid = (cells[fid_idx].strip() if fid_idx is not None and fid_idx < len(cells) else "")
+        if fid and await db.momo_transactions.find_one({"chat_id": chat_id, "f_id": fid}):
+            skipped += 1
             continue
-        amount = _parse_amount(t.get("amount"))
-        if amount is None or amount <= 0:
-            continue
-        ref = str(t.get("ref") or "").strip()
-        merchant = (t.get("merchant") or "MoMo").strip()
-        cat = (t.get("expense_category") or "other").lower()
-        # Deterministic alias override: a typed reference matching a known shorthand wins.
-        alias = aliases.get((t.get("ref_text") or "").strip().lower())
-        if alias:
-            merchant = alias["name"]
-            cat = (alias.get("category") or cat).lower()
-        currency = (t.get("currency") or DEFAULT_CURRENCY).strip().upper()[:3]
-        spent_at = _resolve_date(t.get("date"), att.get("date"))
-        if ref:
-            if ref in seen_refs or await db.expenses.find_one({"chat_id": chat_id, "momo_ref": ref}):
-                continue
-            seen_refs.add(ref)
-        elif await _is_duplicate(chat_id, merchant, amount, currency, spent_at):
-            continue
-        doc = await _log_expense(
-            chat_id,
+        await db.momo_transactions.insert_one(
             {
                 "chat_id": chat_id,
-                "merchant": merchant,
-                "amount": amount,
-                "currency": currency,
-                "category": cat if cat in _CATEGORIES else "other",
-                "description": (t.get("description") or "").strip(),
-                "spent_at": spent_at,
-                "source": "momo",
-                "email_id": f"momo:{att.get('uid', '')}",
-                "momo_ref": ref,
-                "created_at": _resolve_date(None, None),
-            },
+                "source_file": att["filename"],
+                "statement_period": period,
+                "columns": columns,        # exact 16 column names, verbatim
+                "values": cells,           # raw cell values, unaltered
+                "f_id": fid,               # dedup key (the statement's own transaction ID)
+                "imported_at": datetime.now(timezone.utc),
+            }
         )
-        logged.append(doc)
+        saved += 1
 
-    if not logged:
-        return (f"Read {att['filename']} — no new spending found to add (it's already imported, "
-                "or contained only money-in / transfers, which we don't count as expenses).")
-
-    totals: dict[str, float] = {}
-    for d in logged:
-        totals[d["currency"]] = round(totals.get(d["currency"], 0.0) + float(d["amount"]), 2)
-    lines = [f"📄 Imported {len(logged)} spending transactions from {att['filename']}:"]
-    for d in logged[:20]:
-        lines.append(f"  • {d['currency']} {float(d['amount']):,.2f} · {d['merchant']} [{d['category']}]")
-    if len(logged) > 20:
-        lines.append(f"  …and {len(logged) - 20} more.")
-    lines.append("Total: " + ", ".join(f"{c} {a:,.2f}" for c, a in sorted(totals.items())))
-    return "\n".join(lines)
+    msg = f"📄 Saved {saved} transactions from {att['filename']}"
+    if period:
+        msg += f" ({period})"
+    if skipped:
+        msg += f". Skipped {skipped} already saved"
+    return msg + "."

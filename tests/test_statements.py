@@ -1,6 +1,5 @@
-"""MoMo statement import — logs spending only, deduped by MoMo reference.
-The PDF fetch + text extraction + LLM parse are mocked (no IMAP, no pdfplumber, no network)."""
-import json
+"""MoMo statement import — faithful, lossless save of the full transaction table.
+The PDF fetch + table extraction are mocked (no IMAP, no pdfplumber, no network)."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,90 +12,84 @@ CHAT_ID = 999
 ATT = {"filename": "MomoStatementReport.pdf", "bytes": b"%PDF-1.4 fake",
        "uid": "77", "date": "2026-06-22 10:00", "source": "yahoo"}
 
-TXNS = [
-    {"merchant": "MTN Airtime", "amount": "20", "currency": "GHS", "date": "2026-06-18",
-     "expense_category": "bills", "ref": "REF123", "description": "airtime top-up"},
-    {"merchant": "ShopRite", "amount": "150.50", "currency": "GHS", "date": "2026-06-19",
-     "expense_category": "shopping", "ref": "REF124", "description": "groceries"},
+COLUMNS = ["TRANSACTION DATE", "FROM ACCT", "FROM NAME", "FROM NO.", "TRANS. TYPE", "AMOUNT",
+           "FEES", "E-LEVY", "BAL BEFORE", "BAL AFTER", "TO NO.", "TO NAME", "TO ACCT", "F_ID",
+           "REF", "OVA"]
+ROWS = [
+    ["20-Jun-2026 03:34:37 PM", "46792472", "BLAISE SONZIE\nMENNIA", "233545296150", "TRANSFER",
+     "120", "0.9", "0", "145.44", "24.54", "233552210985", "NAFISA\nAWUDU", "59175523",
+     "83739953756", "G", "Internal"],
+    ["19-Jun-2026 12:14:08 PM", "46792472", "BLAISE SONZIE\nMENNIA", "233545296150", "CASH_OUT",
+     "200", "2", "0", "609.39", "407.39", "233553541290", "KODZO\nAGBAVOR", "104258507",
+     "83660872440", "NationalId--", "Internal"],
 ]
+PERIOD = "From: 23-May-2026 To: 22-Jun-2026"
 
 
-def _provider_txns(txns):
-    prov = MagicMock()
-    prov.chat = AsyncMock(return_value=json.dumps({"transactions": txns}))
-    return prov
+def _patches(rows=ROWS):
+    return (
+        patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=ATT)),
+        patch("agentzero.statements._extract_tables", MagicMock(return_value=(COLUMNS, rows, PERIOD))),
+    )
 
 
 @pytest.mark.asyncio
-async def test_import_logs_spending_and_dedupes(mock_db):
-    with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=ATT)), \
-         patch("agentzero.statements._extract_pdf_text", return_value="line1\nMTN Airtime 20\nShopRite 150.50"), \
-         patch("agentzero.statements.get_provider", return_value=_provider_txns(TXNS)):
+async def test_saves_everything_verbatim(mock_db):
+    p1, p2 = _patches()
+    with p1, p2:
         out = await statements.import_momo_statement(CHAT_ID)
-
-    assert "Imported 2" in out
-    assert "ShopRite" in out
-    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID, "source": "momo"}) == 2
-    doc = await mock_db.expenses.find_one({"chat_id": CHAT_ID, "merchant": "ShopRite"})
-    assert doc["momo_ref"] == "REF124" and doc["amount"] == 150.5
-
-    # Re-import the same statement → every txn deduped by ref → nothing new added.
-    with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=ATT)), \
-         patch("agentzero.statements._extract_pdf_text", return_value="line1\nMTN Airtime 20\nShopRite 150.50"), \
-         patch("agentzero.statements.get_provider", return_value=_provider_txns(TXNS)):
-        out2 = await statements.import_momo_statement(CHAT_ID)
-    assert "no new spending" in out2.lower()
-    assert await mock_db.expenses.count_documents({"chat_id": CHAT_ID, "source": "momo"}) == 2
+    assert "Saved 2 transactions" in out
+    docs = await mock_db.momo_transactions.find({"chat_id": CHAT_ID}).to_list(None)
+    assert len(docs) == 2
+    # exact columns preserved, content not altered (incl. money-in types like CASH_OUT)
+    d = next(x for x in docs if x["f_id"] == "83739953756")
+    assert d["columns"] == COLUMNS                      # exact column names
+    assert d["values"][4] == "TRANSFER"                  # TRANS. TYPE verbatim
+    assert d["values"][11] == "NAFISA\nAWUDU"            # wrapped cell kept verbatim
+    assert d["values"][14] == "G"                        # the REF column, faithfully
+    assert d["statement_period"] == PERIOD
+    assert any(x["values"][4] == "CASH_OUT" for x in docs)  # money-movement rows saved too
 
 
 @pytest.mark.asyncio
-async def test_alias_override_and_charity(mock_db):
-    """G→MaryJ alias overrides merchant/category deterministically; people→charity via the LLM."""
-    txns = [
-        {"merchant": "unknown", "amount": "120", "currency": "GHS", "date": "2026-06-20",
-         "ref": "REFG1", "ref_text": "G", "expense_category": "other", "description": ""},
-        {"merchant": "Felix", "amount": "50", "currency": "GHS", "date": "2026-06-21",
-         "ref": "REFF1", "ref_text": "Felix", "expense_category": "charity", "description": "sent to Felix"},
-    ]
-    with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=ATT)), \
-         patch("agentzero.statements._extract_pdf_text", return_value="G 120\nFelix 50"), \
-         patch("agentzero.statements.get_provider", return_value=_provider_txns(txns)):
+async def test_dedup_by_fid_on_reimport(mock_db):
+    p1, p2 = _patches()
+    with p1, p2:
         await statements.import_momo_statement(CHAT_ID)
-
-    maryj = await mock_db.expenses.find_one({"chat_id": CHAT_ID, "merchant": "MaryJ"})
-    assert maryj is not None and maryj["category"] == "entertainment"   # alias applied
-    felix = await mock_db.expenses.find_one({"chat_id": CHAT_ID, "merchant": "Felix"})
-    assert felix is not None and felix["category"] == "charity"          # person → charity
-
-
-@pytest.mark.asyncio
-async def test_add_momo_alias(mock_db):
-    out = await execute_tool(CHAT_ID, ToolCall(name="add_momo_alias", args={"code": "K", "name": "Kofi's shop", "category": "food"}))
-    assert "kofi's shop" in out.lower()
-    aliases = await statements._load_aliases(CHAT_ID)
-    assert aliases["k"]["name"] == "Kofi's shop" and aliases["k"]["category"] == "food"
-    # built-in G→MaryJ still present
-    assert aliases["g"]["name"] == "MaryJ"
+    p1, p2 = _patches()
+    with p1, p2:
+        out2 = await statements.import_momo_statement(CHAT_ID)
+    assert "Skipped 2 already saved" in out2
+    assert await mock_db.momo_transactions.count_documents({"chat_id": CHAT_ID}) == 2
 
 
 @pytest.mark.asyncio
-async def test_import_no_attachment(mock_db):
+async def test_no_attachment(mock_db):
     with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=None)):
         out = await statements.import_momo_statement(CHAT_ID)
     assert "couldn't find" in out.lower()
 
 
 @pytest.mark.asyncio
-async def test_import_scanned_pdf_no_text(mock_db):
+async def test_no_table_extracted(mock_db):
     with patch("agentzero.imap_mail.find_pdf_attachment", new=AsyncMock(return_value=ATT)), \
-         patch("agentzero.statements._extract_pdf_text", return_value="   "):
+         patch("agentzero.statements._extract_tables", MagicMock(return_value=([], [], ""))):
         out = await statements.import_momo_statement(CHAT_ID)
-    assert "no extractable text" in out.lower()
+    assert "couldn't extract" in out.lower()
 
 
 @pytest.mark.asyncio
 async def test_tool_routes_to_importer(mock_db):
-    with patch("agentzero.statements.import_momo_statement", new=AsyncMock(return_value="IMPORT OK")) as imp:
+    with patch("agentzero.statements.import_momo_statement", new=AsyncMock(return_value="SAVED")) as imp:
         out = await execute_tool(CHAT_ID, ToolCall(name="import_momo_statement", args={}))
     imp.assert_awaited_once()
-    assert out == "IMPORT OK"
+    assert out == "SAVED"
+
+
+@pytest.mark.asyncio
+async def test_add_momo_alias_still_works(mock_db):
+    out = await execute_tool(CHAT_ID, ToolCall(name="add_momo_alias", args={"code": "K", "name": "Kofi's shop", "category": "food"}))
+    assert "kofi's shop" in out.lower()
+    aliases = await statements._load_aliases(CHAT_ID)
+    assert aliases["k"]["name"] == "Kofi's shop"
+    assert aliases["g"]["name"] == "MaryJ"  # built-in default still present
