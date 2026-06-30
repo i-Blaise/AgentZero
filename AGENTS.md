@@ -275,6 +275,13 @@ statuses: pending → awaiting_ack → done (or cancelled).
   `_sim` alone used to silently miss these → the reminder never closed and nagged forever.
 - **`cancel_reminder` covers `awaiting_ack`**, not just `pending` — a reminder that has already fired
   and is nagging can be removed by phrase, not only completed.
+- **Legacy `fired` status is closeable** (`_ACTIVE_REMINDER_STATUSES = pending/awaiting_ack/fired`):
+  an older lifecycle wrote `status="fired"` instead of `awaiting_ack`; those orphans were invisible
+  to complete/cancel/list (which filtered only pending+awaiting_ack), so the user could never close
+  them ("no reminder matching…"). complete_reminder, cancel_reminder, and list_reminders now include
+  `fired`. No current code writes `fired` (scheduler.py writes `awaiting_ack`); this only un-strands
+  the legacy cohort and defends against any stray. The follow-up loop still nags `awaiting_ack` only,
+  so re-including `fired` does NOT resurrect 2-week-old reminders to ping the user.
 - **Closing clears `next_nudge_at`** (complete/cancel + the by-id button paths) and `_fire_reminder`
   refuses to fire a reminder whose status isn't `pending` — together these stop a closed reminder
   from being resurrected/re-nudged (the stale-`next_nudge_at` data bug).

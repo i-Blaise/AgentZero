@@ -385,12 +385,18 @@ async def _set_reminder(chat_id: int, args: dict) -> str:
     return f"Got it — I'll remind you to {text} at {when}."
 
 
+# A reminder is "active" (still closeable / nag-able / listable) in any of these states.
+# "fired" is a legacy state from an older lifecycle (pre-awaiting_ack); we keep it here so
+# those orphaned reminders stay visible and closeable instead of becoming un-killable ghosts.
+_ACTIVE_REMINDER_STATUSES = ["pending", "awaiting_ack", "fired"]
+
+
 async def _list_reminders(chat_id: int, args: dict) -> str:
     db = get_db()
     tz = ZoneInfo(TIMEZONE)
     rows = (
         await db.reminders.find(
-            {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
+            {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
         )
         .sort("fire_at", 1)
         .to_list(None)
@@ -458,7 +464,7 @@ async def _complete_reminder(chat_id: int, args: dict) -> str:
     db = get_db()
     query = args["query"]
     rows = await db.reminders.find(
-        {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
+        {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
     ).to_list(None)
     if not rows:
         return "No active reminders to close out."
@@ -491,10 +497,10 @@ async def _complete_reminder(chat_id: int, args: dict) -> str:
 async def _cancel_reminder(chat_id: int, args: dict) -> str:
     db = get_db()
     query = args["query"]
-    # Include awaiting_ack — a reminder that has already FIRED and is nagging must be
-    # cancellable too, not just not-yet-fired ones.
+    # Include awaiting_ack/fired — a reminder that has already FIRED (current or legacy
+    # lifecycle) and is lingering must be cancellable too, not just not-yet-fired ones.
     one_offs = await db.reminders.find(
-        {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
+        {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
     ).to_list(None)
     recurring = await db.recurring_reminders.find(
         {"chat_id": chat_id, "active": True}

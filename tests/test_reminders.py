@@ -295,6 +295,38 @@ async def test_cancel_reminder_kills_awaiting_ack(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_close_legacy_fired_reminder(mock_db):
+    """Reminders stranded in the legacy 'fired' status (pre-awaiting_ack lifecycle) must be
+    closeable and cancellable — not invisible ghosts the user can never kill."""
+    now = datetime.now(timezone.utc)
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "Create a demo video for the Sway project", "fire_at": now,
+         "fired_at": now, "status": "fired", "created_at": now}
+    )).inserted_id
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("complete_reminder", query="sway demo video"))
+    assert "done" in result.lower()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "done"
+    assert doc["next_nudge_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_legacy_fired_reminder(mock_db):
+    """A legacy 'fired' reminder must also be cancellable by phrase."""
+    now = datetime.now(timezone.utc)
+    rid = (await mock_db.reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "Study for assessment with Hivemind", "fire_at": now,
+         "fired_at": now, "status": "fired", "created_at": now}
+    )).inserted_id
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("cancel_reminder", query="hivemind assessment"))
+    assert "cancelled" in result.lower()
+    doc = await mock_db.reminders.find_one({"_id": rid})
+    assert doc["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_fire_reminder_does_not_resurrect_closed(mock_db):
     """A stale job firing for an already-done reminder must NOT re-open it."""
     from agentzero import scheduler
