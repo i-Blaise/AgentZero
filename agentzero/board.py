@@ -63,6 +63,8 @@ def serialize_task(task: dict, project: dict | None) -> dict:
         "project": (project or {}).get("name"),
         "scope": (project or {}).get("scope"),
         "status": task.get("status"),
+        # Goal/step hierarchy: None → standalone/goal, set → a step under that goal id.
+        "parent_task_id": str(task["parent_task_id"]) if task.get("parent_task_id") else None,
         "due_date": _iso(task.get("due_date")),
         "snoozed_until": _iso(task.get("snoozed_until")),
         "is_overdue": is_overdue,

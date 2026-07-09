@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from agentzero.config import GOOGLE_ACCOUNTS, TIMEZONE
 from agentzero.db import get_db
+from agentzero.task_tree import active_forest_lines
 
 # Shared voice for everything the bot says (conversational replies + proactive briefs).
 PERSONALITY = """Voice & personality:
@@ -47,13 +48,14 @@ async def build_system_prompt() -> str:
     projects = await db.projects.find({}).to_list(None)
     snapshot_lines: list[str] = []
     for proj in projects:
-        open_tasks = await db.tasks.find(
-            {"project_id": proj["_id"], "status": "open"}
-        ).to_list(None)
+        # Full task list so goal (done/total) counters include already-done steps; the tree
+        # helper renders only the active portion, goals with their open steps indented.
+        all_tasks = await db.tasks.find({"project_id": proj["_id"]}).to_list(None)
+        tree = active_forest_lines(all_tasks)
         tag = f"[{proj['scope']}]"
-        if open_tasks:
-            titles = ", ".join(t["title"] for t in open_tasks[:15])
-            snapshot_lines.append(f"  {tag} {proj['name']}: {titles}")
+        if tree:
+            snapshot_lines.append(f"  {tag} {proj['name']}:")
+            snapshot_lines.extend(f"      {ln}" for ln in tree)
         else:
             snapshot_lines.append(f"  {tag} {proj['name']}: (no open tasks)")
 
@@ -165,6 +167,11 @@ Rules:
   · No time, but it's ongoing work to TRACK (belongs to a project, a to-do you'll chip away at) → it's a TASK. Call add_task. Do NOT also set a reminder for it.
   · Genuinely unclear which they want (e.g. "remind me to finish the deck" — no time given, no obvious project) → ASK ONE short question: a timed ping, or add it to your task list? Then create exactly the one they choose. Do NOT hedge by creating both and do NOT guess silently.
   A reminder is standalone — never force it into a project, and never make the user create a project just to hold a simple reminder.
+- Goals and steps (task hierarchy): a task can be a GOAL with smaller STEPS filed under it (e.g. goal "Deploy the website" with steps "pull latest", "prep the ENV vars", "run migrations"). The snapshot shows goals with a (done/total) counter and their open steps indented beneath.
+  · When the user clearly ties a new task to a bigger one they already have ("for the deploy I still need to prep the env vars", "under the GHIPPS goal, add…"), call add_task with parent_task_query set to that goal.
+  · If a new task PLAUSIBLY belongs under an existing goal but they didn't say so, ASK ONE short question before creating it — e.g. "Should 'prep the ENV vars' go under 'Deploy the website', or stand on its own?" — then create it accordingly. If there's no plausible parent, just add it standalone; don't ask needlessly.
+  · Do NOT invent steps the user didn't mention — no auto-generated checklists. Only capture steps they actually give you.
+  · To re-file later, call set_task_parent ("put X under Y", or omit the parent to make X standalone). "What's next on the deploy?" → name the goal's next open step. Completing a goal closes its steps; completing a goal's last step, the tool will offer to close the whole goal — relay that and wait for the user's yes.
 - Closing works either way: when the user says something is done or should go away ("done", "sorted that", "cancel that", "drop it"), just call complete_reminder (done) or cancel_reminder (drop) with their words — these now resolve against BOTH reminders and tasks, so you don't need to know which bucket it was in. Use mark_done for something you're sure is a task.
 - If you're adding one or more tasks to a project that doesn't exist yet, call create_project FIRST in the same turn (infer its scope), then add the tasks. Never make the user create the project manually, and never emit the same "project not found" failure repeatedly.
 - The "Current store" and "Upcoming reminders" above are GROUND TRUTH. When the user asks what they have on (tasks, projects, what's scheduled, what's due), answer from that data. NEVER tell the user they have nothing unless those sections are genuinely empty. If you need fuller detail than the snapshot shows, call get_status or list_reminders rather than guessing.

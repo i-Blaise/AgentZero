@@ -212,6 +212,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `tools.py` | Neutral JSON-Schema tool definitions |
 | `llm.py` | `LLMProvider` Protocol + `OpenAIProvider` (default) + `AnthropicProvider`. **Nothing else imports openai/anthropic.** |
 | `executor.py` | Deterministic tool execution, fuzzy matching, events log, `undo_last` |
+| `task_tree.py` | Pure helpers for the goal→step task tree (`build_forest`, `active_forest_lines`, progress) — one source of truth for tree rendering across snapshot/status/digest/board |
 | `prompts.py` | `build_system_prompt()` (injects date/time, store snapshot, reminders, memory) + `PERSONALITY` constant |
 | `scheduler.py` | APScheduler: one-off reminders, heartbeat interval, morning-digest cron |
 | `autonomy.py` | Proactive heartbeat — ranks open tasks by urgency, LLM picks ONE to nudge (or SILENT); suppresses only that task; spontaneous jittered spacing |
@@ -231,7 +232,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
 
 ### Data model (MongoDB collections)
-`projects`, `tasks`, `events` (undo log), `chat_history` (last ~10 msgs/chat),
+`projects`, `tasks` (optional `parent_task_id` → goal/step tree), `events` (undo log), `chat_history` (last ~10 msgs/chat),
 `reminders`, `recurring_reminders` (cron-style repeating pings), `memory` (freeform facts),
 `system_state` (last/next proactive-nudge time, nudge cadence, `last_app_scan_uid`),
 `seen_jobs`, `applications` (tracked job applications), `expenses` (logged from receipts),
@@ -239,7 +240,7 @@ adapter translates them and manages its own native multi-turn message format ins
 cursors (`receipt_cursor_<source>`) and the application scan cursor (`last_app_scan_uid`).
 
 ### Tools the LLM can call
-Local: `create_project`, `add_task`, `mark_done`, `update_task`, `snooze`,
+Local: `create_project`, `add_task`, `mark_done`, `set_task_parent`, `update_task`, `snooze`,
 `get_status`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
 `complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
 `set_job_profile`, `find_jobs`, `web_search`, `web_fetch`, `list_applications`,
@@ -287,9 +288,28 @@ statuses: pending → awaiting_ack → done (or cancelled).
   model asks ONE question (timed ping vs task list) instead of hedging. The old "pick whichever fits"
   wording let the brain create BOTH a reminder and a task for one request (the "two of the same" bug).
 - **Dedup guards are deterministic, in the executor** (belt to the prompt's suspenders): `_add_task`
-  refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task in the same project; `_set_reminder`
-  refuses a near-identical reminder within 5 min of an existing active one's `fire_at` (so a deliberate
+  refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task with the SAME `parent_task_id` in the same
+  project (so the same step title under two different goals is fine); `_set_reminder` refuses a
+  near-identical reminder within 5 min of an existing active one's `fire_at` (so a deliberate
   "at 9 and again at 5" still makes two). These stop silent duplicates even if the brain misfires.
+- **Task hierarchy: goals → steps** (`tasks.parent_task_id`, `task_tree.py`). A task with children is a
+  "goal"; a task with `parent_task_id` set is a step. The tree is only ever TWO levels deep — filing under
+  a step re-points to that step's goal (`_match_goal` flattens; `set_task_parent` refuses to move a task
+  that itself has steps). `add_task` takes an optional `parent_task_query`; `set_task_parent` attaches
+  ("put X under Y") or detaches (omit parent → standalone). The prompt tells the model to ASK when a new
+  task plausibly belongs under an existing goal but wasn't explicitly tied to one, and to NEVER
+  auto-generate steps the user didn't mention. Rendering is centralised in `task_tree.active_forest_lines`
+  (goals show `(done/total)` with open steps indented) — used by the chat snapshot (`prompts.py`),
+  `get_status`, and echoed in the digest (`title (Project ▸ Goal)`) and board (`parent_task_id` field).
+  Completion cascades in `_do_close_task`: closing a GOAL closes its open steps (with notice); closing a
+  goal's LAST open step nudges to finish the goal but does NOT auto-close it (completion stays the user's
+  call). Both the chat path and the by-id button path (`mark_done_by_id`) route through `_do_close_task`.
+- **Task matching upgraded** (`_fuzzy_tasks` + `_task_strong`): tasks now match via substring / token-overlap
+  (like reminders) instead of bare `_sim ≥ 0.4`. The old whole-string ratio floats ~0.5 for unrelated
+  titles sharing a stop-word ("Deploy the website" vs "prep the ENV vars" = 0.514), which made closing a
+  goal spuriously ambiguous. `_task_strong` requires a substring or ≥0.6 word-overlap for a STRONG match;
+  raw `_sim ≥ 0.6` is only a single-best fuzzy-typo fallback. Returns all strong matches (→ ambiguity
+  prompt on genuine near-dupes) else the one best.
 - **Unified closing** — `_close_task` / `_close_reminders` are None-returning cores; `mark_done`,
   `complete_reminder`, and `cancel_reminder` each try their own store then FALL BACK to the other, so
   "done/cancel X" closes the thing whether it was a task or a reminder. Cross-fallback only fires when

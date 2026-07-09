@@ -18,6 +18,7 @@ from bson import ObjectId
 from agentzero.config import TIMEZONE
 from agentzero.db import get_db
 from agentzero.llm import ToolCall
+from agentzero.task_tree import active_forest_lines
 
 
 def _parse_datetime(s: str) -> datetime | None:
@@ -55,18 +56,42 @@ def _parse_date(s: str) -> datetime | None:
     return None
 
 
+def _task_strong(query: str, title: str) -> bool:
+    """A STRONG (confident) task match: the query is a substring of the title (or vice-versa),
+    or most of the query's meaningful words appear in the title. Deliberately does NOT trust
+    the raw difflib ratio, which floats around ~0.5 for unrelated strings that merely share a
+    stop-word like "the" — the source of the old over-matching."""
+    q = (query or "").lower().strip()
+    t = (title or "").lower()
+    if not q or not t:
+        return False
+    if q in t or t in q:
+        return True
+    qtok = [w for w in re.findall(r"\w+", q) if len(w) > 2]
+    if qtok:
+        return sum(1 for w in qtok if w in t) / len(qtok) >= 0.6
+    return False
+
+
 async def _fuzzy_tasks(query: str, status: str | None = "open") -> list[dict]:
+    """Find tasks matching a phrase, best first. So "deploy" finds "deploy backend", while
+    "Deploy the website" does NOT drag in an unrelated "prep the ENV vars" just because both
+    contain "the". Returns all STRONG matches (genuine near-duplicates → callers surface an
+    ambiguity prompt), else the single best plausible match (fuzzy typo tolerance), else []."""
     db = get_db()
     filt: dict = {}
     if status:
         filt["status"] = status
     tasks = await db.tasks.find(filt).to_list(None)
-    scored = sorted(
-        ((t, _sim(query, t["title"])) for t in tasks),
-        key=lambda x: x[1],
-        reverse=True,
-    )
-    return [t for t, score in scored if score >= 0.4]
+    strong = [(t, _reminder_score(query, t["title"])) for t in tasks if _task_strong(query, t["title"])]
+    if strong:
+        strong.sort(key=lambda x: x[1], reverse=True)
+        return [t for t, _ in strong]
+    if tasks:
+        best = max(tasks, key=lambda t: _sim(query, t["title"]))
+        if _sim(query, best["title"]) >= 0.6:
+            return [best]
+    return []
 
 
 async def _fuzzy_project(name: str) -> dict | None:
@@ -108,6 +133,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "create_project": _create_project,
         "add_task": _add_task,
         "mark_done": _mark_done,
+        "set_task_parent": _set_task_parent,
         "get_status": _get_status,
         "update_task": _update_task,
         "snooze": _snooze,
@@ -196,6 +222,29 @@ async def _create_project(chat_id: int, args: dict) -> str:
     return f'Created project "{name}" ({scope}).'
 
 
+async def _match_goal(query: str, project_id, exclude_id=None) -> tuple[dict | None, str | None]:
+    """Resolve a phrase to a single active goal task within a project, flattening to keep the
+    tree two levels deep (if the match is itself a step, we return ITS goal). Returns
+    (goal, None) on a clean hit, or (None, message) to bubble a not-found / be-specific reply."""
+    db = get_db()
+    matches = await _fuzzy_tasks(query, status=None)
+    matches = [
+        m for m in matches
+        if m.get("project_id") == project_id and m["status"] != "done" and m["_id"] != exclude_id
+    ]
+    if not matches:
+        return None, f'Couldn\'t find a task "{query}" here to file this under. Add that goal first, or leave it standalone.'
+    if len(matches) > 1:
+        listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
+        return None, f'Which task should it go under? Several match "{query}":\n{listed}'
+    goal = matches[0]
+    if goal.get("parent_task_id"):  # keep it two levels — file under the grandparent goal
+        gp = await db.tasks.find_one({"_id": goal["parent_task_id"]})
+        if gp:
+            goal = gp
+    return goal, None
+
+
 async def _add_task(chat_id: int, args: dict) -> str:
     db = get_db()
     project = await _fuzzy_project(args["project_name"])
@@ -209,20 +258,32 @@ async def _add_task(chat_id: int, args: dict) -> str:
         if not due_date:
             return f'Could not parse date "{raw}". Use YYYY-MM-DD.'
 
-    # Dedup guard: never silently create a second near-identical task in the same project
-    # (a common double-fire when the brain hedges or repeats a request). Deterministic —
-    # the model can't talk its way past this.
+    # Optionally file this task as a STEP under an existing goal.
+    parent = None
+    if pq := (args.get("parent_task_query") or "").strip():
+        parent, err = await _match_goal(pq, project["_id"])
+        if err:
+            return err
+    parent_id = parent["_id"] if parent else None
+
+    # Dedup guard: never silently create a second near-identical task under the SAME parent
+    # in the same project (a common double-fire when the brain hedges). Scoped by parent, so
+    # the same step title under two different goals is allowed. Deterministic — the model
+    # can't talk its way past this.
     existing = await db.tasks.find(
-        {"project_id": project["_id"], "status": {"$in": ["open", "snoozed"]}}
+        {"project_id": project["_id"], "status": {"$in": ["open", "snoozed"]},
+         "parent_task_id": parent_id}
     ).to_list(None)
     for t in existing:
         if _sim(title, t["title"]) >= 0.85:
-            return f'You already have "{t["title"]}" in {project["name"]} — not adding a duplicate.'
+            where = f'under "{parent["title"]}"' if parent else f"in {project['name']}"
+            return f'You already have "{t["title"]}" {where} — not adding a duplicate.'
 
     now = datetime.utcnow()
     result = await db.tasks.insert_one(
         {
             "project_id": project["_id"],
+            "parent_task_id": parent_id,
             "title": title,
             "status": "open",
             "due_date": due_date,
@@ -234,29 +295,68 @@ async def _add_task(chat_id: int, args: dict) -> str:
     )
     await _log_event(chat_id, "add_task", "tasks", result.inserted_id, None)
     due_str = f" (due {due_date.strftime('%Y-%m-%d')})" if due_date else ""
+    if parent:
+        return f'Added "{title}" as a step under "{parent["title"]}"{due_str}.'
     return f'Added "{title}" to {project["name"]}{due_str}.'
+
+
+async def _progress_counts(goal_id) -> tuple[int, int]:
+    """(#done, #total) over a goal's steps."""
+    db = get_db()
+    steps = await db.tasks.find({"parent_task_id": goal_id}).to_list(None)
+    return sum(1 for s in steps if s.get("status") == "done"), len(steps)
+
+
+async def _do_close_task(chat_id: int, task: dict) -> str:
+    """Mark one task done, then handle the hierarchy:
+      - closing a GOAL cascade-closes its still-open steps (with notice);
+      - closing the LAST open STEP of a goal nudges to close the goal (does NOT auto-close it
+        — completion stays the user's call);
+      - closing a non-last step reports progress (2/4)."""
+    db = get_db()
+    now = datetime.utcnow()
+    prev_state = dict(task)
+    await db.tasks.update_one(
+        {"_id": task["_id"]}, {"$set": {"status": "done", "updated_at": now}}
+    )
+    await _log_event(chat_id, "mark_done", "tasks", task["_id"], prev_state)
+
+    # This task is a GOAL → cascade-close its remaining open steps.
+    open_steps = await db.tasks.find(
+        {"parent_task_id": task["_id"], "status": {"$in": ["open", "snoozed"]}}
+    ).to_list(None)
+    if open_steps:
+        for s in open_steps:
+            await db.tasks.update_one(
+                {"_id": s["_id"]}, {"$set": {"status": "done", "updated_at": now}}
+            )
+            await _log_event(chat_id, "mark_done", "tasks", s["_id"], dict(s))
+        n = len(open_steps)
+        return f'Done: "{task["title"]}" — and closed its {n} open step{"" if n == 1 else "s"} too.'
+
+    # This task is a STEP → progress / last-step nudge.
+    if task.get("parent_task_id"):
+        parent = await db.tasks.find_one({"_id": task["parent_task_id"]})
+        done, total = await _progress_counts(task["parent_task_id"])
+        if parent and parent.get("status") != "done" and done >= total:
+            return (f'Done: "{task["title"]}". That was the last open step under '
+                    f'"{parent["title"]}" — want me to mark the whole goal done?')
+        if parent:
+            return f'Done: "{task["title"]}" ({parent["title"]}: {done}/{total} steps).'
+    return f'Done: "{task["title"]}".'
 
 
 async def _close_task(chat_id: int, query: str) -> str | None:
     """Close a single matching open task. Returns a message on success or on an ambiguous
     (>1) match; returns None when NO task matched, so callers can fall back to reminders
     (unified closing — the user shouldn't need to know which bucket a thing landed in)."""
-    db = get_db()
     matches = await _fuzzy_tasks(query)
     if not matches:
         return None
     if len(matches) > 1:
         listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
         return f'Found {len(matches)} tasks matching "{query}" — be more specific:\n{listed}'
-
-    task = matches[0]
-    prev_state = dict(task)
-    await db.tasks.update_one(
-        {"_id": task["_id"]},
-        {"$set": {"status": "done", "updated_at": datetime.utcnow()}},
-    )
-    await _log_event(chat_id, "mark_done", "tasks", task["_id"], prev_state)
-    return f'Done: "{task["title"]}".'
+    return await _do_close_task(chat_id, matches[0])
 
 
 async def _mark_done(chat_id: int, args: dict) -> str:
@@ -269,6 +369,47 @@ async def _mark_done(chat_id: int, args: dict) -> str:
     if rem_msg is not None:
         return rem_msg
     return f'No open task or reminder matching "{query}".'
+
+
+async def _set_task_parent(chat_id: int, args: dict) -> str:
+    """Attach an existing task under a goal ("put X under Y") or detach it back to standalone
+    ("make X its own task"). Omit parent_task_query to detach."""
+    db = get_db()
+    matches = await _fuzzy_tasks(args["task_query"], status=None)
+    matches = [m for m in matches if m["status"] != "done"]
+    if not matches:
+        return f'No active task matching "{args["task_query"]}".'
+    if len(matches) > 1:
+        listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
+        return f'Found {len(matches)} tasks matching "{args["task_query"]}" — be more specific:\n{listed}'
+    task = matches[0]
+
+    parent_q = (args.get("parent_task_query") or "").strip()
+    if not parent_q:  # detach → standalone
+        if not task.get("parent_task_id"):
+            return f'"{task["title"]}" is already a standalone task.'
+        prev = dict(task)
+        await db.tasks.update_one(
+            {"_id": task["_id"]},
+            {"$set": {"parent_task_id": None, "updated_at": datetime.utcnow()}},
+        )
+        await _log_event(chat_id, "set_task_parent", "tasks", task["_id"], prev)
+        return f'"{task["title"]}" is now a standalone task.'
+
+    # Moving a task that itself has steps would create a 3-deep tree — refuse cleanly.
+    if await db.tasks.count_documents({"parent_task_id": task["_id"]}):
+        return f'"{task["title"]}" has its own steps under it — detach those first, or move a different task.'
+
+    parent, err = await _match_goal(parent_q, task.get("project_id"), exclude_id=task["_id"])
+    if err:
+        return err
+    prev = dict(task)
+    await db.tasks.update_one(
+        {"_id": task["_id"]},
+        {"$set": {"parent_task_id": parent["_id"], "updated_at": datetime.utcnow()}},
+    )
+    await _log_event(chat_id, "set_task_parent", "tasks", task["_id"], prev)
+    return f'Filed "{task["title"]}" under "{parent["title"]}".'
 
 
 async def _update_task(chat_id: int, args: dict) -> str:
@@ -354,19 +495,15 @@ async def _get_status(chat_id: int, args: dict) -> str:
 
     lines: list[str] = []
     for proj in projects:
-        open_tasks = await db.tasks.find(
-            {"project_id": proj["_id"], "status": "open"}
-        ).to_list(None)
+        # Pull ALL tasks so goal progress counts include already-done steps; the tree helper
+        # renders only the active (open/snoozed) portion.
+        all_tasks = await db.tasks.find({"project_id": proj["_id"]}).to_list(None)
+        tree = active_forest_lines(all_tasks)
         tag = f"[{proj['scope']}]"
-        if open_tasks:
-            lines.append(f"{tag} {proj['name']} ({len(open_tasks)} open)")
-            for t in open_tasks:
-                due = (
-                    f" — due {t['due_date'].strftime('%Y-%m-%d')}"
-                    if t.get("due_date")
-                    else ""
-                )
-                lines.append(f"  • {t['title']}{due}")
+        if tree:
+            open_count = sum(1 for t in all_tasks if t.get("status") in ("open", "snoozed"))
+            lines.append(f"{tag} {proj['name']} ({open_count} open)")
+            lines.extend(f"  {ln}" for ln in tree)
         else:
             lines.append(f"{tag} {proj['name']} (no open tasks)")
 
@@ -777,12 +914,9 @@ async def mark_done_by_id(chat_id: int, tid: str) -> str:
         return "Can't find that task."
     if t["status"] == "done":
         return f'Already done: "{t["title"]}".'
-    prev = dict(t)
-    await db.tasks.update_one(
-        {"_id": oid}, {"$set": {"status": "done", "updated_at": datetime.utcnow()}}
-    )
-    await _log_event(chat_id, "mark_done", "tasks", oid, prev)
-    return f'✅ Done: "{t["title"]}".'
+    # Route through the shared closer so a goal cascades to its steps and a last-step close
+    # nudges to finish the goal — same behaviour as the chat path.
+    return f'✅ {await _do_close_task(chat_id, t)}'
 
 
 async def mute_task_nudge_by_id(chat_id: int, tid: str, days: int = 2) -> str:

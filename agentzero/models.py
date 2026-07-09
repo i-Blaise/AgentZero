@@ -59,6 +59,9 @@ class ProjectDoc(TypedDict, total=False):
 class TaskDoc(TypedDict, total=False):
     _id: Any
     project_id: Any
+    # None → standalone task (or a "goal" once steps are filed under it); set → this is a
+    # STEP under the referenced goal. The tree is only ever two levels deep.
+    parent_task_id: Optional[Any]
     title: str
     status: str
     due_date: Optional[datetime]

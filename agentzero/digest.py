@@ -30,11 +30,16 @@ async def _gather(chat_id: int) -> dict:
 
     projects = {p["_id"]: p for p in await db.projects.find({}).to_list(None)}
 
+    # Map every task by id so a step can name the goal it belongs to.
+    tasks_by_id = {t["_id"]: t for t in await db.tasks.find({}).to_list(None)}
+
     overdue, due_today, due_tomorrow, upcoming, undated = [], [], [], [], []
     for t in await db.tasks.find({"status": "open"}).to_list(None):
         proj = projects.get(t["project_id"])
         pname = proj["name"] if proj else "?"
-        label = f"{t['title']} ({pname})"
+        goal = tasks_by_id.get(t.get("parent_task_id")) if t.get("parent_task_id") else None
+        ctx = f"{pname} ▸ {goal['title']}" if goal else pname
+        label = f"{t['title']} ({ctx})"
         due = t.get("due_date")
         if due:
             d = due.date() if hasattr(due, "date") else due

@@ -23,7 +23,12 @@ TOOLS: list[dict] = [
     },
     {
         "name": "add_task",
-        "description": "Add a task to an existing project.",
+        "description": (
+            "Add a task to an existing project. To file it as a STEP under an existing goal "
+            "(e.g. 'prep the ENV vars' under 'Deploy the website'), pass parent_task_query — "
+            "only when the user clearly ties it to that goal, or after you've asked and they "
+            "confirmed which goal it belongs under. Otherwise leave it out and it's standalone."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -36,8 +41,41 @@ TOOLS: list[dict] = [
                     "type": "string",
                     "description": "Optional due date in YYYY-MM-DD format",
                 },
+                "parent_task_query": {
+                    "type": "string",
+                    "description": (
+                        "Optional: a keyword/phrase for the existing GOAL task this should be "
+                        "a step under (fuzzy matched within the same project). Omit for a "
+                        "standalone task."
+                    ),
+                },
             },
             "required": ["project_name", "title"],
+        },
+    },
+    {
+        "name": "set_task_parent",
+        "description": (
+            "Re-file an existing task in the goal tree: attach it under a goal ('put the env-var "
+            "task under Deploy', 'that belongs to the GHIPPS goal') or detach it back to "
+            "standalone ('make X its own task'). Omit parent_task_query to detach."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_query": {
+                    "type": "string",
+                    "description": "Keyword/phrase for the task to re-file (fuzzy matched)",
+                },
+                "parent_task_query": {
+                    "type": "string",
+                    "description": (
+                        "Keyword/phrase for the GOAL to file it under. Omit (or leave empty) to "
+                        "detach the task back to standalone."
+                    ),
+                },
+            },
+            "required": ["task_query"],
         },
     },
     {
