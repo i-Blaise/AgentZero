@@ -61,6 +61,17 @@ async def test_add_task(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_add_task_dedup(mock_db):
+    """A near-identical open task in the same project must NOT be duplicated — the deterministic
+    guard returns 'not adding a duplicate' instead of a second insert."""
+    await execute_tool(CHAT_ID, _tc("create_project", name="Work", scope="work"))
+    await execute_tool(CHAT_ID, _tc("add_task", project_name="Work", title="Create a demo video"))
+    result = await execute_tool(CHAT_ID, _tc("add_task", project_name="Work", title="Create a demo video"))
+    assert "not adding a duplicate" in result.lower()
+    assert await mock_db.tasks.count_documents({"title": "Create a demo video"}) == 1
+
+
+@pytest.mark.asyncio
 async def test_add_task_project_not_found(mock_db):
     result = await execute_tool(CHAT_ID, _tc("add_task", project_name="ghost", title="thing"))
     assert "not found" in result.lower()

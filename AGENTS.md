@@ -282,6 +282,18 @@ statuses: pending → awaiting_ack → done (or cancelled).
   `fired`. No current code writes `fired` (scheduler.py writes `awaiting_ack`); this only un-strands
   the legacy cohort and defends against any stray. The follow-up loop still nags `awaiting_ack` only,
   so re-including `fired` does NOT resurrect 2-week-old reminders to ping the user.
+- **Task vs reminder is mutually exclusive, decided up front** (prompt `Rules:`): a request with a
+  TIME → reminder only; no time but ongoing/trackable work → task only; genuinely ambiguous → the
+  model asks ONE question (timed ping vs task list) instead of hedging. The old "pick whichever fits"
+  wording let the brain create BOTH a reminder and a task for one request (the "two of the same" bug).
+- **Dedup guards are deterministic, in the executor** (belt to the prompt's suspenders): `_add_task`
+  refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task in the same project; `_set_reminder`
+  refuses a near-identical reminder within 5 min of an existing active one's `fire_at` (so a deliberate
+  "at 9 and again at 5" still makes two). These stop silent duplicates even if the brain misfires.
+- **Unified closing** — `_close_task` / `_close_reminders` are None-returning cores; `mark_done`,
+  `complete_reminder`, and `cancel_reminder` each try their own store then FALL BACK to the other, so
+  "done/cancel X" closes the thing whether it was a task or a reminder. Cross-fallback only fires when
+  the primary store has NO match (ambiguous multi-match still returns the be-specific prompt).
 - **Closing clears `next_nudge_at`** (complete/cancel + the by-id button paths) and `_fire_reminder`
   refuses to fire a reminder whose status isn't `pending` — together these stop a closed reminder
   from being resurrected/re-nudged (the stale-`next_nudge_at` data bug).

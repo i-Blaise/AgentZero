@@ -50,6 +50,50 @@ async def test_set_reminder(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_set_reminder_dedup_same_time(mock_db):
+    """Two near-identical reminders for essentially the same time must collapse to one —
+    the classic double-fire when the brain hedges."""
+    when = _future_local(3)
+    with patch("agentzero.scheduler.schedule_reminder"):
+        await execute_tool(CHAT_ID, _tc("set_reminder", text="call the bank", fire_at=when))
+        result = await execute_tool(CHAT_ID, _tc("set_reminder", text="call the bank", fire_at=when))
+    assert "not adding a duplicate" in result.lower()
+    assert await mock_db.reminders.count_documents({"text": "call the bank"}) == 1
+
+
+@pytest.mark.asyncio
+async def test_set_reminder_same_text_different_time_allowed(mock_db):
+    """A deliberate second reminder for the SAME thing at a clearly different time is allowed."""
+    with patch("agentzero.scheduler.schedule_reminder"):
+        await execute_tool(CHAT_ID, _tc("set_reminder", text="drink water", fire_at=_future_local(5)))
+        await execute_tool(CHAT_ID, _tc("set_reminder", text="drink water", fire_at=_future_local(120)))
+    assert await mock_db.reminders.count_documents({"text": "drink water"}) == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_reminder_falls_back_to_task(mock_db):
+    """Unified closing: complete_reminder with no matching reminder closes a matching TASK."""
+    await execute_tool(CHAT_ID, _tc("create_project", name="Work", scope="work"))
+    await execute_tool(CHAT_ID, _tc("add_task", project_name="Work", title="deploy backend"))
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("complete_reminder", query="deploy backend"))
+    assert "done" in result.lower()
+    task = await mock_db.tasks.find_one({"title": "deploy backend"})
+    assert task["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_mark_done_falls_back_to_reminder(mock_db):
+    """Unified closing: mark_done with no matching task closes a matching REMINDER."""
+    with patch("agentzero.scheduler.schedule_reminder"), patch("agentzero.scheduler.get_scheduler"):
+        await execute_tool(CHAT_ID, _tc("set_reminder", text="submit the invoice", fire_at=_future_local(4)))
+        result = await execute_tool(CHAT_ID, _tc("mark_done", task_query="submit the invoice"))
+    assert "nagging" in result.lower() or "done" in result.lower()
+    doc = await mock_db.reminders.find_one({"text": "submit the invoice"})
+    assert doc["status"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_set_reminder_past_time(mock_db):
     with patch("agentzero.scheduler.schedule_reminder"):
         result = await execute_tool(

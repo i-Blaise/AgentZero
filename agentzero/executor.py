@@ -209,6 +209,16 @@ async def _add_task(chat_id: int, args: dict) -> str:
         if not due_date:
             return f'Could not parse date "{raw}". Use YYYY-MM-DD.'
 
+    # Dedup guard: never silently create a second near-identical task in the same project
+    # (a common double-fire when the brain hedges or repeats a request). Deterministic —
+    # the model can't talk its way past this.
+    existing = await db.tasks.find(
+        {"project_id": project["_id"], "status": {"$in": ["open", "snoozed"]}}
+    ).to_list(None)
+    for t in existing:
+        if _sim(title, t["title"]) >= 0.85:
+            return f'You already have "{t["title"]}" in {project["name"]} — not adding a duplicate.'
+
     now = datetime.utcnow()
     result = await db.tasks.insert_one(
         {
@@ -227,13 +237,14 @@ async def _add_task(chat_id: int, args: dict) -> str:
     return f'Added "{title}" to {project["name"]}{due_str}.'
 
 
-async def _mark_done(chat_id: int, args: dict) -> str:
+async def _close_task(chat_id: int, query: str) -> str | None:
+    """Close a single matching open task. Returns a message on success or on an ambiguous
+    (>1) match; returns None when NO task matched, so callers can fall back to reminders
+    (unified closing — the user shouldn't need to know which bucket a thing landed in)."""
     db = get_db()
-    query = args["task_query"]
     matches = await _fuzzy_tasks(query)
-
     if not matches:
-        return f'No open task matching "{query}".'
+        return None
     if len(matches) > 1:
         listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
         return f'Found {len(matches)} tasks matching "{query}" — be more specific:\n{listed}'
@@ -246,6 +257,18 @@ async def _mark_done(chat_id: int, args: dict) -> str:
     )
     await _log_event(chat_id, "mark_done", "tasks", task["_id"], prev_state)
     return f'Done: "{task["title"]}".'
+
+
+async def _mark_done(chat_id: int, args: dict) -> str:
+    query = args["task_query"]
+    task_msg = await _close_task(chat_id, query)
+    if task_msg is not None:
+        return task_msg
+    # Unified closing: no task matched — maybe the user is closing a REMINDER.
+    rem_msg = await _close_reminders(chat_id, query)
+    if rem_msg is not None:
+        return rem_msg
+    return f'No open task or reminder matching "{query}".'
 
 
 async def _update_task(chat_id: int, args: dict) -> str:
@@ -369,6 +392,22 @@ async def _set_reminder(chat_id: int, args: dict) -> str:
         return "That time is already in the past — give me a future time."
 
     db = get_db()
+
+    # Dedup guard: if a near-identical reminder for essentially the same time already
+    # exists, don't create a second (the classic double-fire when the brain hedges). We
+    # require BOTH near-identical text AND a fire time within 5 minutes, so a deliberate
+    # "remind me at 9 and again at 5" still creates two.
+    existing = await db.reminders.find(
+        {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
+    ).to_list(None)
+    for r in existing:
+        rf = r["fire_at"]
+        if rf.tzinfo is None:
+            rf = rf.replace(tzinfo=timezone.utc)
+        if _sim(text, r["text"]) >= 0.85 and abs((rf - fire_utc).total_seconds()) <= 300:
+            when = fire_local.strftime("%a %d %b, %H:%M")
+            return f"You've already got a reminder to {text} around {when} — not adding a duplicate."
+
     result = await db.reminders.insert_one(
         {
             "chat_id": chat_id,
@@ -458,20 +497,20 @@ def _select_reminders(query: str, rows: list[dict]) -> list[dict]:
     return []
 
 
-async def _complete_reminder(chat_id: int, args: dict) -> str:
-    """Mark matching reminder(s) done once the user confirms (stops follow-ups). Acts on ALL
-    strong matches, so a backlog of near-duplicate nags clears in one go."""
+async def _close_reminders(chat_id: int, query: str) -> str | None:
+    """Mark matching reminder(s) done. Acts on ALL strong matches, so a backlog of
+    near-duplicate nags clears in one go. Returns a message on success; returns None when
+    NO reminder matched, so callers can fall back to tasks (unified closing)."""
     db = get_db()
-    query = args["query"]
     rows = await db.reminders.find(
         {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
     ).to_list(None)
     if not rows:
-        return "No active reminders to close out."
+        return None
 
     selected = _select_reminders(query, rows)
     if not selected:
-        return f'No active reminder matching "{query}".'
+        return None
 
     for r in selected:
         prev_state = dict(r)
@@ -494,6 +533,20 @@ async def _complete_reminder(chat_id: int, args: dict) -> str:
     return f"Marked {len(selected)} reminders done: {listed}. I'll stop nagging."
 
 
+async def _complete_reminder(chat_id: int, args: dict) -> str:
+    """Mark a reminder done once the user confirms (stops follow-ups). Unified closing: if
+    nothing matches a reminder, fall back to closing a matching TASK — so the user never
+    has to know which bucket the thing landed in."""
+    query = args["query"]
+    rem_msg = await _close_reminders(chat_id, query)
+    if rem_msg is not None:
+        return rem_msg
+    task_msg = await _close_task(chat_id, query)
+    if task_msg is not None:
+        return task_msg
+    return f'No active reminder or task matching "{query}".'
+
+
 async def _cancel_reminder(chat_id: int, args: dict) -> str:
     db = get_db()
     query = args["query"]
@@ -506,6 +559,10 @@ async def _cancel_reminder(chat_id: int, args: dict) -> str:
         {"chat_id": chat_id, "active": True}
     ).to_list(None)
     if not one_offs and not recurring:
+        # Unified closing: nothing to cancel among reminders — maybe it's a task.
+        task_msg = await _close_task(chat_id, query)
+        if task_msg is not None:
+            return task_msg
         return "No active reminders to cancel."
 
     items = [("one_off", r) for r in one_offs] + [("recurring", r) for r in recurring]
@@ -514,6 +571,10 @@ async def _cancel_reminder(chat_id: int, args: dict) -> str:
     if not strong:
         bk, br, bs = max(scored, key=lambda x: x[2])
         if bs < 0.34:
+            # Unified closing: no reminder matched — maybe they're cancelling a task.
+            task_msg = await _close_task(chat_id, query)
+            if task_msg is not None:
+                return task_msg
             return f'No reminder matching "{query}".'
         strong = [(bk, br)]
 
