@@ -115,10 +115,16 @@ async def api_applications(status: str | None = None) -> dict:
 @router.get("/tasks")
 async def api_tasks(status: str | None = None, scope: str | None = None) -> dict:
     items = await board.query_tasks(status, scope)
+    by_id, children = await board.hierarchy_maps()
     return {
         "count": len(items),
         "by_status": board.task_status_counts([t for t, _ in items]),
-        "tasks": [board.serialize_task(t, p) for t, p in items],
+        # Flat list (respects the status filter), each row annotated with its goal/step
+        # relations: parent_task_id/parent_title for steps, is_goal + steps_done/steps_total
+        # for goals.
+        "tasks": [board.serialize_task(t, p, by_id, children) for t, p in items],
+        # Nested goal→steps view (scope-filtered, ALL statuses so progress is truthful).
+        "tree": await board.task_tree_view(scope),
     }
 
 

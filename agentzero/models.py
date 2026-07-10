@@ -48,6 +48,13 @@ from typing import TypedDict, Optional, Any
 from datetime import datetime
 
 
+# A reminder is "active" (still closeable / nag-able / listable) in any of these states.
+# "fired" is a legacy state from an older lifecycle (pre-awaiting_ack); we keep it so those
+# orphaned reminders stay visible and closeable instead of becoming un-killable ghosts.
+# Single source of truth — used by the executor (complete/cancel/list) and the board API.
+ACTIVE_REMINDER_STATUSES = ["pending", "awaiting_ack", "fired"]
+
+
 class ProjectDoc(TypedDict, total=False):
     _id: Any
     name: str

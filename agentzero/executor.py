@@ -18,6 +18,9 @@ from bson import ObjectId
 from agentzero.config import TIMEZONE
 from agentzero.db import get_db
 from agentzero.llm import ToolCall
+# Which reminder states are still "active" (closeable / nag-able / listable) — includes the
+# legacy "fired" status. Defined in models.py so the board API shares the same definition.
+from agentzero.models import ACTIVE_REMINDER_STATUSES as _ACTIVE_REMINDER_STATUSES
 from agentzero.task_tree import active_forest_lines
 
 
@@ -574,10 +577,6 @@ async def _set_reminder(chat_id: int, args: dict) -> str:
     return f"Got it — I'll remind you to {text} at {when}."
 
 
-# A reminder is "active" (still closeable / nag-able / listable) in any of these states.
-# "fired" is a legacy state from an older lifecycle (pre-awaiting_ack); we keep it here so
-# those orphaned reminders stay visible and closeable instead of becoming un-killable ghosts.
-_ACTIVE_REMINDER_STATUSES = ["pending", "awaiting_ack", "fired"]
 
 
 async def _list_reminders(chat_id: int, args: dict) -> str:

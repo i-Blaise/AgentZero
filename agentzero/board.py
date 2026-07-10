@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 from agentzero.config import TIMEZONE
 from agentzero.db import get_db
+from agentzero.models import ACTIVE_REMINDER_STATUSES
+from agentzero.task_tree import build_forest
 
 
 def _aware(dt):
@@ -51,26 +53,73 @@ async def query_tasks(status: str | None = None, scope: str | None = None) -> li
     return out
 
 
-def serialize_task(task: dict, project: dict | None) -> dict:
+async def hierarchy_maps() -> tuple[dict, dict]:
+    """(by_id, children_by_parent) over ALL tasks — the lookups serialize_task needs to
+    annotate goal/step relations regardless of how the caller filtered its own list."""
+    db = get_db()
+    all_tasks = await db.tasks.find({}).to_list(None)
+    by_id = {t["_id"]: t for t in all_tasks}
+    children: dict = {}
+    for t in all_tasks:
+        p = t.get("parent_task_id")
+        if p is not None and p in by_id:
+            children.setdefault(p, []).append(t)
+    return by_id, children
+
+
+def serialize_task(
+    task: dict, project: dict | None,
+    by_id: dict | None = None, children: dict | None = None,
+) -> dict:
+    """Serialize one task. Pass the `hierarchy_maps()` lookups to fill the goal/step fields
+    (parent_title, is_goal, steps_done/steps_total); without them those degrade gracefully
+    (parent id still present, counts 0)."""
     due = _aware(task.get("due_date"))
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
     is_overdue = bool(
         task.get("status") == "open" and due and due.astimezone(ZoneInfo(TIMEZONE)).date() < today
     )
+    parent_id = task.get("parent_task_id")
+    parent = (by_id or {}).get(parent_id) if parent_id else None
+    steps = (children or {}).get(task.get("_id"), [])
     return {
         "id": str(task.get("_id")),
         "title": task.get("title"),
         "project": (project or {}).get("name"),
         "scope": (project or {}).get("scope"),
         "status": task.get("status"),
-        # Goal/step hierarchy: None → standalone/goal, set → a step under that goal id.
-        "parent_task_id": str(task["parent_task_id"]) if task.get("parent_task_id") else None,
+        # Goal/step hierarchy: parent_task_id None → standalone (or a goal, if steps_total>0);
+        # set → this task is a STEP under that goal.
+        "parent_task_id": str(parent_id) if parent_id else None,
+        "parent_title": parent.get("title") if parent else None,
+        "is_goal": len(steps) > 0,
+        "steps_done": sum(1 for s in steps if s.get("status") == "done"),
+        "steps_total": len(steps),
         "due_date": _iso(task.get("due_date")),
         "snoozed_until": _iso(task.get("snoozed_until")),
         "is_overdue": is_overdue,
         "created_at": _iso(task.get("created_at")),
         "updated_at": _iso(task.get("updated_at")),
     }
+
+
+async def task_tree_view(scope: str | None = None) -> list[dict]:
+    """Nested goal→steps view of the board: top-level nodes (goals + standalone tasks) each
+    carrying their serialized steps. Includes ALL statuses so (steps_done/steps_total) is
+    truthful — status filtering is the flat `tasks` list's job, not the tree's."""
+    items = await query_tasks(None, scope)
+    tasks = [t for t, _ in items]
+    proj_of = {t["_id"]: p for t, p in items}
+    by_id, children = await hierarchy_maps()
+    out = []
+    for node in build_forest(tasks):
+        t = node["task"]
+        ser = serialize_task(t, proj_of.get(t["_id"]), by_id, children)
+        ser["steps"] = [
+            serialize_task(s, proj_of.get(s["_id"]), by_id, children) for s in node["steps"]
+        ]
+        out.append(ser)
+    return out
 
 
 def task_status_counts(tasks: list[dict]) -> dict:
@@ -88,7 +137,9 @@ def task_status_counts(tasks: list[dict]) -> dict:
 async def query_reminders(chat_id: int, status: str | None = None) -> list[dict]:
     db = get_db()
     q: dict = {"chat_id": chat_id}
-    if status:
+    if status == "active":  # pseudo-status: everything still open (incl. legacy "fired")
+        q["status"] = {"$in": ACTIVE_REMINDER_STATUSES}
+    elif status:
         q["status"] = status
     rows = await db.reminders.find(q).to_list(None)
     rows.sort(key=lambda r: _aware(r.get("fire_at")) or datetime.min.replace(tzinfo=timezone.utc))
@@ -100,9 +151,15 @@ def serialize_reminder(r: dict) -> dict:
         "id": str(r.get("_id")),
         "text": r.get("text"),
         "status": r.get("status"),
-        "awaiting_ack": r.get("status") == "awaiting_ack",
+        # Fired-but-unconfirmed. Includes the legacy "fired" status (pre-awaiting_ack
+        # lifecycle) — those are semantically the same "waiting on the user's word" state
+        # and are closeable/cancellable just like awaiting_ack.
+        "awaiting_ack": r.get("status") in ("awaiting_ack", "fired"),
+        # Mirrors the executor's definition of active (pending/awaiting_ack/fired).
+        "is_active": r.get("status") in ACTIVE_REMINDER_STATUSES,
         "fire_at": _iso(r.get("fire_at")),
         "fired_at": _iso(r.get("fired_at")),
+        "next_nudge_at": _iso(r.get("next_nudge_at")),
         "completed_at": _iso(r.get("completed_at")),
         "created_at": _iso(r.get("created_at")),
         "nudge_count": r.get("nudge_count") or 0,
@@ -143,8 +200,17 @@ async def overview(chat_id: int) -> dict:
     task_items = await query_tasks()
     reminders = await query_reminders(chat_id)
     projects = await db.projects.count_documents({})
+    # Goal rollup: how many goals exist and their aggregate step progress.
+    forest = build_forest([t for t, _ in task_items])
+    goal_nodes = [n for n in forest if n["total"] > 0]
     return {
         "tasks": task_status_counts([t for t, _ in task_items]),
         "reminders": reminder_status_counts(reminders),
+        "reminders_active": sum(1 for r in reminders if r.get("status") in ACTIVE_REMINDER_STATUSES),
+        "goals": {
+            "count": len(goal_nodes),
+            "steps_done": sum(n["done"] for n in goal_nodes),
+            "steps_total": sum(n["total"] for n in goal_nodes),
+        },
         "projects": projects,
     }

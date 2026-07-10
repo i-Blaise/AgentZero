@@ -144,10 +144,17 @@ latest inbound body — null for outbound/auto-acks/dead-end rejections, null on
 the API just serializes the stored value.
 `applications.backfill_application_messages()` fills message content for pre-existing apps via
 `last_email_uid` (folder/direction derived: `:sent`→that account's Sent/outbound, else Yahoo inbox/inbound).
-Board endpoints (`board.py`): `/api/tasks` (`status`/`scope` filters → `{count, by_status, tasks[]}`,
-each task with project/scope/status/due_date/is_overdue), `/api/reminders` (`status` filter →
-`{count, by_status, reminders[], recurring[]}`), `/api/overview` (`{tasks, reminders, projects}` count
-rollup). `period` is today|week|month|all; explicit
+Board endpoints (`board.py`): `/api/tasks` (`status`/`scope` filters → `{count, by_status, tasks[],
+tree[]}`) — the flat `tasks[]` respects the status filter and each row carries its hierarchy relations
+(`parent_task_id`/`parent_title` for steps; `is_goal` + `steps_done`/`steps_total` for goals, via
+`hierarchy_maps()` over ALL tasks so counts stay truthful under filtering); `tree[]` is the nested
+goal→steps view (`task_tree_view`, scope-filtered but ALL statuses so progress is honest — status
+filtering is the flat list's job). `/api/reminders` (`status` filter, plus pseudo-status
+`status=active` = the executor's `ACTIVE_REMINDER_STATUSES` from models.py: pending/awaiting_ack/legacy
+fired → `{count, by_status, reminders[], recurring[]}`; each reminder has `awaiting_ack` (true for BOTH
+awaiting_ack and legacy fired — same "waiting on the user's word" state), `is_active`, and
+`next_nudge_at`). `/api/overview` (`{tasks, reminders, reminders_active, goals:{count, steps_done,
+steps_total}, projects}` rollup). `period` is today|week|month|all; explicit
 `start`/`end` ISO dates override it. Amounts are grouped per currency (never summed across).
 
 ## Yahoo Mail — read-only (IMAP)
@@ -226,7 +233,7 @@ adapter translates them and manages its own native multi-turn message format ins
 | `statements.py` | MoMo / mobile-money statement import — pulls the PDF from the inbox (`imap_mail.find_pdf_attachment`), extracts text (`pdfplumber`, lazy import), LLM-parses SPENDING only, logs deduped by `momo_ref` (source `momo`). Tool `import_momo_statement`. |
 | `api.py` | Read-only dashboard JSON API mounted at `/api` (expenses + applications). Gated by `DASHBOARD_API_KEY` (X-API-Key header); 404 when unset. |
 | `user_model.py` | Self-updating user model — daily LLM reflection over memory + activity → an evolving WHO/WORKING-ON/GOALS/PATTERNS summary stored on `profile.user_model`, injected into every prompt. |
-| `board.py` | Structured read access to tasks + reminders for the dashboard API (query/serialize/counts + overview rollup). |
+| `board.py` | Structured read access to tasks + reminders for the dashboard API (query/serialize/counts, goal→step `hierarchy_maps`/`task_tree_view`, overview rollup). |
 | `audio.py` | Whisper voice transcription (always OpenAI) |
 | `telegram_io.py` | `send()` with 4096-char splitting |
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
