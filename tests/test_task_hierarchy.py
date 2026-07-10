@@ -162,6 +162,65 @@ async def test_get_status_renders_tree(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_exact_title_breaks_near_duplicate_tie(mock_db):
+    """The Telegram loop bug: two titles differing by one word ('your') both match ANY
+    phrase — even each other's exact titles — so disambiguation could never resolve. An
+    exact-title query must short-circuit to that one task."""
+    await _project()
+    db = get_db()
+    # Insert directly: the dedup guard (rightly) refuses to create this pair via add_task.
+    proj = await db.projects.find_one({"name": "Deploy Proj"})
+    from datetime import datetime
+    for title in ("Add Sway to portfolio website", "Add Sway to your portfolio website."):
+        await db.tasks.insert_one(
+            {"project_id": proj["_id"], "parent_task_id": None, "title": title,
+             "status": "open", "due_date": None, "snoozed_until": None,
+             "last_nudged_at": None, "created_at": datetime.utcnow(),
+             "updated_at": datetime.utcnow()}
+        )
+    # A vague phrase is genuinely ambiguous → be-specific prompt (correct).
+    with patch("agentzero.scheduler.get_scheduler"):
+        vague = await execute_tool(CHAT_ID, _tc("mark_done", task_query="sway portfolio"))
+    assert "be more specific" in vague.lower()
+    # The exact title (case-insensitive, trailing period tolerated) resolves decisively.
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(
+            CHAT_ID, _tc("mark_done", task_query="add sway to your portfolio website")
+        )
+    assert "done" in result.lower()
+    assert (await db.tasks.find_one({"title": "Add Sway to your portfolio website."}))["status"] == "done"
+    assert (await db.tasks.find_one({"title": "Add Sway to portfolio website"}))["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_exact_title_short_circuit_in_set_task_parent(mock_db):
+    """set_task_parent must also resolve an exact title against a near-duplicate pair."""
+    await _project()
+    db = get_db()
+    proj = await db.projects.find_one({"name": "Deploy Proj"})
+    from datetime import datetime
+    for title in ("Add Sway to portfolio website", "Add Sway to your portfolio website"):
+        await db.tasks.insert_one(
+            {"project_id": proj["_id"], "parent_task_id": None, "title": title,
+             "status": "open", "due_date": None, "snoozed_until": None,
+             "last_nudged_at": None, "created_at": datetime.utcnow(),
+             "updated_at": datetime.utcnow()}
+        )
+    await execute_tool(CHAT_ID, _tc("add_task", project_name="Deploy Proj", title="Sway launch goal"))
+    result = await execute_tool(
+        CHAT_ID,
+        _tc("set_task_parent", task_query="Add Sway to portfolio website",
+            parent_task_query="Sway launch goal"),
+    )
+    assert "filed" in result.lower()
+    goal = await db.tasks.find_one({"title": "Sway launch goal"})
+    moved = await db.tasks.find_one({"title": "Add Sway to portfolio website"})
+    untouched = await db.tasks.find_one({"title": "Add Sway to your portfolio website"})
+    assert moved["parent_task_id"] == goal["_id"]
+    assert untouched["parent_task_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_undo_refile(mock_db):
     await _project()
     await execute_tool(CHAT_ID, _tc("add_task", project_name="Deploy Proj", title="Deploy the website"))

@@ -310,6 +310,15 @@ statuses: pending → awaiting_ack → done (or cancelled).
   goal spuriously ambiguous. `_task_strong` requires a substring or ≥0.6 word-overlap for a STRONG match;
   raw `_sim ≥ 0.6` is only a single-best fuzzy-typo fallback. Returns all strong matches (→ ambiguity
   prompt on genuine near-dupes) else the one best.
+- **Exact-title short-circuit** (`_fuzzy_tasks`, first check): a query that IS a task's title
+  (case/whitespace/trailing-period insensitive) returns that task alone. Without it, two titles differing
+  by one word ("Add Sway to portfolio website" vs "…your portfolio website") are BOTH strong for any
+  phrase — including each other's exact titles — so the "be more specific" prompt looped forever with no
+  answer that could resolve it (the Telegram infinite-clarification bug). Paired prompt rules: when the
+  user picks from a numbered disambiguation list, re-call the tool with that item's EXACT title verbatim
+  (never the bare number — positional replies match nothing, there's no pending-choice state); and never
+  ask the same clarifying question twice — on a second ambiguous result, surface the near-dupes and how
+  they differ instead of re-asking.
 - **Unified closing** — `_close_task` / `_close_reminders` are None-returning cores; `mark_done`,
   `complete_reminder`, and `cancel_reminder` each try their own store then FALL BACK to the other, so
   "done/cancel X" closes the thing whether it was a task or a reminder. Cross-fallback only fires when

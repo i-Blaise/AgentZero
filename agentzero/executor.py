@@ -83,6 +83,19 @@ async def _fuzzy_tasks(query: str, status: str | None = "open") -> list[dict]:
     if status:
         filt["status"] = status
     tasks = await db.tasks.find(filt).to_list(None)
+
+    # Exact-title short-circuit: a query that IS one task's title (case/whitespace/trailing-.
+    # insensitive) resolves to that task alone, even when a near-duplicate title would also
+    # match on tokens. Without this, two titles differing by one word ("…portfolio website"
+    # vs "…your portfolio website") are BOTH strong for any phrase — including each other's
+    # exact titles — so the "be more specific" prompt loops forever with no possible answer.
+    def _canon(s: str) -> str:
+        return (s or "").lower().strip().rstrip(".")
+
+    exact = [t for t in tasks if _canon(t["title"]) == _canon(query)]
+    if exact:
+        return exact
+
     strong = [(t, _reminder_score(query, t["title"])) for t in tasks if _task_strong(query, t["title"])]
     if strong:
         strong.sort(key=lambda x: x[1], reverse=True)
