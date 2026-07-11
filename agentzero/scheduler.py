@@ -99,13 +99,10 @@ async def _phrase_reminder(text: str) -> str:
         return f"⏰ Reminder: {text}"
 
 
-def _reminder_buttons(reminder_id: str) -> list[tuple[str, str]]:
-    """Done / snooze controls attached to a fired reminder, so the user taps instead of types."""
-    return [
-        ("✅ Done", f"rem:done:{reminder_id}"),
-        ("⏰ 1h", f"rem:snz:{reminder_id}:60"),
-        ("⏰ 3h", f"rem:snz:{reminder_id}:180"),
-    ]
+# NOTE: fired reminders and follow-up nags used to attach inline Done/snooze buttons.
+# Removed at the owner's request (2026-07-11) — he replies by text ("done", "snooze an
+# hour"). The callback handlers in main.py are deliberately KEPT so buttons on old
+# messages still sitting in the chat history keep working if tapped.
 
 
 async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
@@ -118,7 +115,7 @@ async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
             return
         now = datetime.now(timezone.utc)
         gap = await _followup_minutes(chat_id)
-        await send(chat_id, await _phrase_reminder(text), buttons=_reminder_buttons(reminder_id))
+        await send(chat_id, await _phrase_reminder(text))
         # Don't mark done — await the user's confirmation. It moves to awaiting_ack
         # and the follow-up loop keeps nudging until the user says it's handled.
         await db.reminders.update_one(
@@ -171,7 +168,6 @@ async def _reminder_followup_job(chat_id: int) -> None:
             await _phrase_reminder(
                 f"{r['text']} (still not marked done — tell me when it's handled)"
             ),
-            buttons=_reminder_buttons(str(r["_id"])),
         )
     except Exception:
         logger.exception("Follow-up nudge failed for reminder %s", r["_id"])

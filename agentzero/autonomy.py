@@ -235,16 +235,13 @@ async def run_heartbeat(chat_id: int, force: bool = False) -> str | None:
     if not reply or reply.upper().startswith(SILENT):
         return None
 
-    # Figure out which one task it nudged BEFORE sending, so we can attach Done / Not-now
-    # buttons for that task. Suppress ONLY that one, so the next heartbeat is free to raise
-    # the next-most-urgent — this is what makes the nudges trickle out one at a time.
+    # Figure out which one task it nudged and suppress ONLY that one, so the next heartbeat
+    # is free to raise the next-most-urgent — this is what makes the nudges trickle out one
+    # at a time. (Nudges used to attach Done/Not-now buttons; removed at the owner's request
+    # 2026-07-11 — he replies by text. main.py keeps the callback handlers for old messages.)
     nudged_ids = _suppress_after_nudge(reply, ranked)
-    buttons = None
-    if nudged_ids:
-        tid = str(nudged_ids[0])
-        buttons = [("✅ Done", f"tsk:done:{tid}"), ("🔕 Not now", f"tsk:mute:{tid}:2")]
 
-    await send(chat_id, reply, buttons=buttons)
+    await send(chat_id, reply)
     await _set_last_nudge(chat_id, now_utc)
 
     if nudged_ids:

@@ -349,10 +349,13 @@ statuses: pending → awaiting_ack → done (or cancelled).
   These just ping each occurrence — NO awaiting_ack/follow-up nag. `list_reminders` shows them;
   `cancel_reminder` matches across one-off + recurring and deactivates whichever fits best.
 
-**Inline buttons (callback queries):** fired reminders and follow-up nudges carry
-`✅ Done · ⏰ 1h · ⏰ 3h` buttons; proactive heartbeat nudges carry `✅ Done · 🔕 Not now` for the
-one task they raised. `telegram_io.send(..., buttons=[(label, callback_data)])` attaches a
-single-row keyboard to the final chunk. Taps arrive as `update.callback_query` → `main._handle_callback`,
+**Inline buttons (callback queries) — SENDING REMOVED, handlers kept:** as of 2026-07-11 the owner
+asked for no more buttons ("I'll just text to reply"), so NO outgoing message attaches a keyboard
+anymore — fired reminders, follow-up nudges, and heartbeat nudges all send plain text. Do not re-add
+`buttons=` to sends. The receive side is deliberately kept alive, because messages already in the chat
+history retain their keyboards forever and a tap on an old one must keep working:
+`telegram_io.send(..., buttons=…)` still supports attaching a single-row keyboard, and taps arrive as
+`update.callback_query` → `main._handle_callback`,
 which parses compact `kind:action:id[:arg]` data (`rem:done`, `rem:snz:<id>:<min>`, `tsk:done`,
 `tsk:mute:<id>:<days>`), routes to the executor's by-id actions (`complete_reminder_by_id`,
 `snooze_reminder_by_id`, `mark_done_by_id`, `mute_task_nudge_by_id`), answers the callback (toast),
