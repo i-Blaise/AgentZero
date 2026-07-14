@@ -213,3 +213,50 @@ async def test_overview_goals_rollup(mock_db):
         body = TestClient(_app()).get("/api/overview", headers={"X-API-Key": KEY}).json()
     assert body["goals"] == {"count": 1, "steps_done": 1, "steps_total": 2}
     assert body["reminders_active"] == 2  # legacy fired + pending
+
+
+# ---------------------------------------------------------------------------
+# Daily focus in /api/overview
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_overview_focus_null_before_selection(mock_db):
+    """No slate yet today → overview.focus is null (and older APIs won't have the key
+    at all) — Cockpit must tolerate both."""
+    await _seed(mock_db)
+    p1, p2 = _patches()
+    with p1, p2:
+        body = TestClient(_app()).get("/api/overview", headers={"X-API-Key": KEY}).json()
+    assert body["focus"] is None
+
+
+@pytest.mark.asyncio
+async def test_overview_focus_block(mock_db):
+    from agentzero import focus as focus_mod
+
+    goal_id = await _seed_hierarchy(mock_db)
+    step = await mock_db.tasks.find_one({"title": "prep ENV vars"})
+    done_step = await mock_db.tasks.find_one({"title": "pull latest"})
+    standalone = await mock_db.tasks.find_one({"title": "standalone thing"})
+    now = datetime.now(timezone.utc)
+    await mock_db.daily_focus.insert_one(
+        {"chat_id": CHAT_ID, "date": focus_mod._today_str(),
+         "task_ids": [step["_id"], done_step["_id"]],
+         "carryover_ids": [step["_id"]],
+         "overflow_ids": [standalone["_id"]],
+         "created_at": now}
+    )
+    p1, p2 = _patches()
+    with p1, p2:
+        body = TestClient(_app()).get("/api/overview", headers={"X-API-Key": KEY}).json()
+
+    f = body["focus"]
+    assert f["total"] == 2 and f["done"] == 1
+    assert f["date"] == focus_mod._today_str()
+    by_title = {i["title"]: i for i in f["items"]}
+    assert by_title["prep ENV vars"]["carried_over"] is True
+    assert by_title["prep ENV vars"]["status"] == "open"
+    assert by_title["prep ENV vars"]["parent_title"] == "Deploy the website"
+    assert by_title["pull latest"]["status"] == "done"
+    # Overflow rides along with full task serialization (open tasks only).
+    assert [o["title"] for o in f["overflow"]] == ["standalone thing"]

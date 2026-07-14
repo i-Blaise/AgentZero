@@ -192,6 +192,47 @@ def serialize_recurring(r: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Daily focus (today's committed 3-4 task slate — see focus.py)
+# ---------------------------------------------------------------------------
+
+async def focus_view(chat_id: int) -> dict | None:
+    """Today's focus slate for the dashboard. None when no slate exists yet today
+    (it's committed at the morning digest) — consumers must tolerate that, and older
+    deployed APIs won't have this field at all."""
+    from agentzero.focus import get_today_focus  # lazy: focus pulls in the LLM layer
+
+    db = get_db()
+    doc = await get_today_focus(chat_id)
+    if not doc:
+        return None
+    by_id, children = await hierarchy_maps()
+    projects = {p["_id"]: p for p in await db.projects.find({}).to_list(None)}
+    carry = set(doc.get("carryover_ids", []))
+
+    def _ser(tid) -> dict | None:
+        t = by_id.get(tid)
+        if not t:
+            return None
+        s = serialize_task(t, projects.get(t.get("project_id")), by_id, children)
+        s["carried_over"] = tid in carry
+        return s
+
+    items = [s for s in (_ser(tid) for tid in doc.get("task_ids", [])) if s]
+    # Overflow: overdue/due-today tasks that didn't make the slate — only while still open.
+    overflow = [
+        s for s in (_ser(tid) for tid in doc.get("overflow_ids", []))
+        if s and s["status"] == "open"
+    ]
+    return {
+        "date": doc.get("date"),
+        "done": sum(1 for s in items if s["status"] == "done"),
+        "total": len(items),
+        "items": items,
+        "overflow": overflow,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Overview (KPI rollup)
 # ---------------------------------------------------------------------------
 
@@ -212,5 +253,7 @@ async def overview(chat_id: int) -> dict:
             "steps_done": sum(n["done"] for n in goal_nodes),
             "steps_total": sum(n["total"] for n in goal_nodes),
         },
+        # Today's committed slate; null until the morning selection has run.
+        "focus": await focus_view(chat_id),
         "projects": projects,
     }
