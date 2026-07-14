@@ -152,6 +152,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "set_task_parent": _set_task_parent,
         "get_status": _get_status,
         "get_recap": _get_recap,
+        "set_daily_focus": _set_daily_focus,
         "update_task": _update_task,
         "snooze": _snooze,
         "set_reminder": _set_reminder,
@@ -312,9 +313,44 @@ async def _add_task(chat_id: int, args: dict) -> str:
     )
     await _log_event(chat_id, "add_task", "tasks", result.inserted_id, None)
     due_str = f" (due {due_date.strftime('%Y-%m-%d')})" if due_date else ""
+    notes = await _new_task_focus_notes(chat_id, result.inserted_id, due_date)
     if parent:
-        return f'Added "{title}" as a step under "{parent["title"]}"{due_str}.'
-    return f'Added "{title}" to {project["name"]}{due_str}.'
+        return f'Added "{title}" as a step under "{parent["title"]}"{due_str}.{notes}'
+    return f'Added "{title}" to {project["name"]}{due_str}.{notes}'
+
+
+async def _new_task_focus_notes(chat_id: int, task_id, due_date) -> str:
+    """Deadline-pressure notices for a just-added task — never silent about a same-day
+    deadline that missed the slate, and flag when one day is accumulating more deadline
+    tasks than a daily focus can hold."""
+    from agentzero import focus
+
+    if due_date is None:
+        return ""
+    db = get_db()
+    d = due_date.date() if hasattr(due_date, "date") else due_date
+    notes: list[str] = []
+
+    today = datetime.now(timezone.utc).astimezone(ZoneInfo(TIMEZONE)).date()
+    if d == today:
+        doc = await focus.get_today_focus(chat_id)
+        if doc and task_id not in doc.get("task_ids", []):
+            notes.append(
+                "Heads-up: it's due TODAY but today's focus is already set — say the word "
+                "and I'll swap it in, or it waits for tomorrow's slate."
+            )
+
+    same_day = 0
+    for t in await db.tasks.find({"status": "open"}).to_list(None):
+        td = t.get("due_date")
+        if td is not None and (td.date() if hasattr(td, "date") else td) == d:
+            same_day += 1
+    if same_day >= 4:
+        notes.append(
+            f"That's {same_day} tasks now due {d.strftime('%d %b')} — a daily focus fits "
+            "3-4, so consider spreading some of these out."
+        )
+    return ("\n" + "\n".join(notes)) if notes else ""
 
 
 async def _progress_counts(goal_id) -> tuple[int, int]:
@@ -324,12 +360,37 @@ async def _progress_counts(goal_id) -> tuple[int, int]:
     return sum(1 for s in steps if s.get("status") == "done"), len(steps)
 
 
+async def _focus_close_suffix(chat_id: int, closed_ids: list) -> str:
+    """If this close cleared TODAY'S FOCUS slate, celebrate and suggest what's next
+    (deterministic — overflow deadline tasks first, then the ranked backlog). The
+    suggestions are offers only; nothing joins the slate without the user's word."""
+    from agentzero import focus
+
+    db = get_db()
+    doc = await focus.get_today_focus(chat_id)
+    slate = doc.get("task_ids", []) if doc else []
+    if not slate or not any(cid in slate for cid in closed_ids):
+        return ""
+    for tid in slate:
+        t = await db.tasks.find_one({"_id": tid})
+        if t and t.get("status") != "done":
+            return ""  # slate not cleared yet
+    suggestions = await focus.next_focus_candidates(chat_id, limit=2)
+    base = "\n\nThat clears today's focus — the whole slate."
+    if suggestions:
+        listed = "\n".join(f"  - {s}" for s in suggestions)
+        return (f"{base} If you've still got fuel, next in line would be:\n{listed}\n"
+                "Want either added to today?")
+    return base + " Nothing else is pressing — enjoy the headroom."
+
+
 async def _do_close_task(chat_id: int, task: dict) -> str:
     """Mark one task done, then handle the hierarchy:
       - closing a GOAL cascade-closes its still-open steps (with notice);
       - closing the LAST open STEP of a goal nudges to close the goal (does NOT auto-close it
         — completion stays the user's call);
-      - closing a non-last step reports progress (2/4)."""
+      - closing a non-last step reports progress (2/4).
+    If the close clears today's focus slate, a next-up suggestion is appended."""
     db = get_db()
     now = datetime.utcnow()
     prev_state = dict(task)
@@ -338,6 +399,7 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
         {"$set": {"status": "done", "completed_at": now, "updated_at": now}},
     )
     await _log_event(chat_id, "mark_done", "tasks", task["_id"], prev_state)
+    closed_ids = [task["_id"]]
 
     # This task is a GOAL → cascade-close its remaining open steps.
     open_steps = await db.tasks.find(
@@ -350,19 +412,22 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
                 {"$set": {"status": "done", "completed_at": now, "updated_at": now}},
             )
             await _log_event(chat_id, "mark_done", "tasks", s["_id"], dict(s))
+            closed_ids.append(s["_id"])
         n = len(open_steps)
-        return f'Done: "{task["title"]}" — and closed its {n} open step{"" if n == 1 else "s"} too.'
+        msg = f'Done: "{task["title"]}" — and closed its {n} open step{"" if n == 1 else "s"} too.'
+        return msg + await _focus_close_suffix(chat_id, closed_ids)
 
     # This task is a STEP → progress / last-step nudge.
+    msg = f'Done: "{task["title"]}".'
     if task.get("parent_task_id"):
         parent = await db.tasks.find_one({"_id": task["parent_task_id"]})
         done, total = await _progress_counts(task["parent_task_id"])
         if parent and parent.get("status") != "done" and done >= total:
-            return (f'Done: "{task["title"]}". That was the last open step under '
-                    f'"{parent["title"]}" — want me to mark the whole goal done?')
-        if parent:
-            return f'Done: "{task["title"]}" ({parent["title"]}: {done}/{total} steps).'
-    return f'Done: "{task["title"]}".'
+            msg = (f'Done: "{task["title"]}". That was the last open step under '
+                   f'"{parent["title"]}" — want me to mark the whole goal done?')
+        elif parent:
+            msg = f'Done: "{task["title"]}" ({parent["title"]}: {done}/{total} steps).'
+    return msg + await _focus_close_suffix(chat_id, closed_ids)
 
 
 async def _close_task(chat_id: int, query: str) -> str | None:
@@ -429,6 +494,60 @@ async def _set_task_parent(chat_id: int, args: dict) -> str:
     )
     await _log_event(chat_id, "set_task_parent", "tasks", task["_id"], prev)
     return f'Filed "{task["title"]}" under "{parent["title"]}".'
+
+
+async def _set_daily_focus(chat_id: int, args: dict) -> str:
+    """The user's explicit override of TODAY'S focus slate — add, drop, or swap tasks.
+    Deterministic: selection judgment stays with the morning pick; this just obeys."""
+    from agentzero import focus
+
+    add_q = (args.get("add_task_query") or "").strip()
+    rem_q = (args.get("remove_task_query") or "").strip()
+
+    async def _resolve(q: str) -> tuple[dict | None, str | None]:
+        matches = await _fuzzy_tasks(q)
+        if not matches:
+            return None, f'No open task matching "{q}".'
+        if len(matches) > 1:
+            listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
+            return None, f'Found {len(matches)} tasks matching "{q}" — be more specific:\n{listed}'
+        return matches[0], None
+
+    # Resolve BOTH sides before touching the slate so a failed swap changes nothing.
+    to_add = to_remove = None
+    if add_q:
+        to_add, err = await _resolve(add_q)
+        if err:
+            return err
+    if rem_q:
+        to_remove, err = await _resolve(rem_q)
+        if err:
+            return err
+
+    doc = await focus.get_today_focus(chat_id)
+    slate = doc.get("task_ids", []) if doc else []
+    if to_remove and to_remove["_id"] not in slate:
+        return f'"{to_remove["title"]}" isn\'t in today\'s focus.'
+    if to_add and to_add["_id"] in slate:
+        return f'"{to_add["title"]}" is already in today\'s focus.'
+
+    if to_remove:
+        await focus.remove_from_focus(chat_id, to_remove["_id"])
+    if to_add:
+        await focus.add_to_focus(chat_id, to_add["_id"])
+
+    if to_add and to_remove:
+        return f'Swapped "{to_add["title"]}" into today\'s focus for "{to_remove["title"]}".'
+    if to_add:
+        return f'Added "{to_add["title"]}" to today\'s focus.'
+    if to_remove:
+        return f'Dropped "{to_remove["title"]}" from today\'s focus.'
+
+    # Neither given → just show the slate.
+    overview = await focus.focus_overview(chat_id)
+    if not overview or not overview["lines"]:
+        return "No focus set for today yet — it's picked at the morning digest, or name a task to add now."
+    return "Today's focus:\n" + "\n".join(f"  {i+1}. {ln}" for i, ln in enumerate(overview["lines"]))
 
 
 async def _update_task(chat_id: int, args: dict) -> str:

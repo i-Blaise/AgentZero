@@ -38,10 +38,13 @@ HEARTBEAT_MINUTES: int = int(os.environ.get("HEARTBEAT_MINUTES", "15"))
 QUIET_HOURS_START: int = int(os.environ.get("QUIET_HOURS_START", "21"))  # 21:00
 QUIET_HOURS_END: int = int(os.environ.get("QUIET_HOURS_END", "8"))       # 08:00
 # Proactive nudges fire ONE item at a time, spaced by a random gap in this range so they
-# feel spontaneous rather than landing on a fixed schedule (e.g. one now, another in ~40 min,
-# another in ~2 h). Set both to the same value for a fixed cadence.
-NUDGE_MIN_GAP_MINUTES: int = int(os.environ.get("NUDGE_MIN_GAP_MINUTES", "30"))
-NUDGE_MAX_GAP_MINUTES: int = int(os.environ.get("NUDGE_MAX_GAP_MINUTES", "150"))
+# feel spontaneous rather than landing on a fixed schedule (e.g. one now, another in ~1 h,
+# another in ~3 h). Set both to the same value for a fixed cadence.
+# Raised from 30-150 on 2026-07-14 at the owner's request — slightly fewer pings; combined
+# with the daily-focus fence (focus.py) this caps proactive task nudges at roughly one per
+# focus task per day, spread out.
+NUDGE_MIN_GAP_MINUTES: int = int(os.environ.get("NUDGE_MIN_GAP_MINUTES", "45"))
+NUDGE_MAX_GAP_MINUTES: int = int(os.environ.get("NUDGE_MAX_GAP_MINUTES", "180"))
 
 # Morning digest — daily rundown
 MORNING_DIGEST_ENABLED: bool = os.environ.get("MORNING_DIGEST_ENABLED", "true").lower() == "true"

@@ -571,6 +571,30 @@ TOOLS: list[dict] = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "set_daily_focus",
+        "description": (
+            "Adjust TODAY'S FOCUS — the small slate of 3-4 tasks committed for today (picked "
+            "each morning; proactive nudges only ever concern these). Use when the user says "
+            "'add X to today's focus', 'swap X in for Y', 'drop Y from today', or accepts a "
+            "suggested next task after clearing the slate. Pass add_task_query and/or "
+            "remove_task_query (both = a swap); pass neither to show the current slate."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "add_task_query": {
+                    "type": "string",
+                    "description": "Keyword/phrase for the task to ADD to today's focus (fuzzy matched).",
+                },
+                "remove_task_query": {
+                    "type": "string",
+                    "description": "Keyword/phrase for the task to DROP from today's focus (fuzzy matched).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_recap",
         "description": (
             "Brief the user on everything they COMPLETED over a recent period — tasks marked "

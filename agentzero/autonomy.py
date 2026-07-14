@@ -6,6 +6,7 @@ LLM whether anything is genuinely worth messaging them about *right now*.  The
 bar is deliberately high: an unhelpful proactive ping is worse than silence.
 
 Guardrails:
+  - nudges are fenced to TODAY'S FOCUS slate (focus.py) — never other projects
   - quiet hours (no overnight pings)
   - cooldown between proactive messages
   - per-task dedupe via last_nudged_at (won't re-nudge the same task within 24h)
@@ -33,6 +34,7 @@ from agentzero.config import (
     TIMEZONE,
 )
 from agentzero.db import get_db
+from agentzero.focus import ensure_today_focus
 from agentzero.llm import get_provider
 from agentzero.prompts import PERSONALITY
 from agentzero.telegram_io import send
@@ -140,7 +142,7 @@ def _format_candidates(c: dict) -> str:
     ranked = _ranked(c)
     lines: list[str] = []
     if ranked:
-        lines.append("Open tasks, most pressing first:")
+        lines.append("Today's focus tasks (the user's committed slate), most pressing first:")
         for t, p, s in ranked:
             due = t.get("due_date")
             if due and s in ("work", "personal") and t in [e[0] for e in c["overdue"]]:
@@ -205,6 +207,17 @@ async def run_heartbeat(chat_id: int, force: bool = False) -> str | None:
                 return None
 
     c = await gather_candidates(chat_id)
+
+    # Fence nudges to TODAY'S FOCUS slate (3-4 committed tasks, picked at the morning
+    # digest — carryovers first, then most urgent). Without this, each nudge suppressed
+    # only itself and the next heartbeat moved down the ranked list, so the user got
+    # pinged about four unrelated projects back-to-back. Tasks outside the slate re-enter
+    # contention at the next morning's selection; explicit timed reminders are unaffected.
+    focus_doc = await ensure_today_focus(chat_id)
+    focus_ids = set(focus_doc.get("task_ids", []))
+    for key in ("overdue", "due_soon", "stalled"):
+        c[key] = [e for e in c[key] if e[0]["_id"] in focus_ids]
+
     ranked = _ranked(c)
     if not ranked and not c["memories"]:
         return None  # nothing to even consider — skip the LLM call
@@ -214,7 +227,9 @@ async def run_heartbeat(chat_id: int, force: bool = False) -> str | None:
         f"You are AgentZero, a proactive personal assistant. Current local time: "
         f"{now_local.strftime('%Y-%m-%d %H:%M')} ({TIMEZONE}).\n\n"
         f"{PERSONALITY}\n\n"
-        "Below is the user's current state, with open tasks ordered most-pressing first. "
+        "Below is the user's current state. The tasks shown are TODAY'S FOCUS — the small "
+        "slate the user committed to this morning; everything else is deliberately out of "
+        "sight until tomorrow. "
         "Your job: pick the SINGLE most important thing to nudge them about right now and "
         "send ONE message about THAT ONE THING only — not a list, not a roundup. You'll get "
         "more chances later to raise the others, so don't dump them all at once. Use your own "

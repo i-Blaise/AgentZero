@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from agentzero import focus
 from agentzero.config import TIMEZONE
 from agentzero.db import get_db
 from agentzero.llm import get_provider
@@ -100,17 +101,36 @@ def _has_anything(data: dict) -> bool:
 
 async def send_morning_digest(chat_id: int) -> str:
     data = await _gather(chat_id)
-    summary = _format(data)
+
+    # The selection moment: commit today's focus slate (carryovers first, then the most
+    # urgent — LLM-judged when there's a genuine choice), and disclose any deadline tasks
+    # that didn't make it so nothing due today is ever silently hidden.
+    focus_block = ""
+    try:
+        await focus.ensure_today_focus(chat_id)
+        overview = await focus.focus_overview(chat_id)
+        if overview and overview["lines"]:
+            focus_block = "TODAY'S FOCUS (the committed slate — lead with this):\n"
+            focus_block += "\n".join(f"  {i + 1}. {ln}" for i, ln in enumerate(overview["lines"]))
+            if overview["overflow_lines"]:
+                focus_block += "\nAlso due today but NOT in focus (offer to swap in):\n"
+                focus_block += "\n".join(f"  - {ln}" for ln in overview["overflow_lines"])
+            focus_block += "\n\n"
+    except Exception:
+        logger.exception("Focus selection failed — sending digest without a slate")
+
+    summary = focus_block + _format(data)
     greeting = data["now_local"].strftime("%A %d %B")
 
     system = (
         f"{PERSONALITY}\n\n"
         f"It's the morning briefing ({greeting}). Below is everything on the user's plate. "
-        "Write a concise morning rundown in your voice: open with a one-liner, then lay out "
-        "what actually matters today — lead with overdue and due-today, then the rest, kept "
-        "skimmable. Be dry and funny, but every item must stay clear and accurate; don't drop "
-        "or mangle any of it. If the plate is empty, say so with appropriate suspicion. "
-        "No corporate filler, no sign-off."
+        "Write a concise morning rundown in your voice: LEAD with TODAY'S FOCUS — the 3-4 "
+        "tasks committed for today (mark carryovers as such); that slate is the day's plan. "
+        "If items are listed as due today but NOT in focus, mention them once and offer to "
+        "swap one in. Then the rest of the plate briefly, kept skimmable. Be dry and funny, "
+        "but every item must stay clear and accurate; don't drop or mangle any of it. If the "
+        "plate is empty, say so with appropriate suspicion. No corporate filler, no sign-off."
     )
 
     try:
@@ -129,18 +149,47 @@ async def send_morning_digest(chat_id: int) -> str:
 
 async def send_evening_digest(chat_id: int) -> str:
     data = await _gather(chat_id)
-    summary = _format(data)
+
+    # Focus scoreboard: how today's slate went, and what carries into tomorrow. Read-only —
+    # the evening never (re)selects a slate.
+    focus_block = ""
+    try:
+        overview = await focus.focus_overview(chat_id)
+        if overview and overview["total"]:
+            focus_block = f"TODAY'S FOCUS SCOREBOARD: {overview['done']}/{overview['total']} done.\n"
+            if overview["done_lines"]:
+                focus_block += "Completed:\n" + "\n".join(f"  ✓ {ln}" for ln in overview["done_lines"]) + "\n"
+            if overview["open_lines"]:
+                focus_block += "Carrying over to tomorrow:\n" + "\n".join(
+                    f"  - {ln}" for ln in overview["open_lines"]
+                ) + "\n"
+            focus_block += "\n"
+    except Exception:
+        logger.exception("Focus scoreboard failed — sending digest without it")
+
+    # Overbooking check for tomorrow: more deadline tasks than the slate can hold is a
+    # scheduling conflict to resolve tonight, not a surprise at breakfast.
+    if len(data["due_tomorrow"]) > 4:
+        focus_block += (
+            f"HEADS-UP: {len(data['due_tomorrow'])} tasks are due tomorrow but the daily "
+            "focus holds at most 4 — suggest re-dating or consciously deprioritising some tonight.\n\n"
+        )
+
+    summary = focus_block + _format(data)
     tomorrow = (data["now_local"] + timedelta(days=1)).strftime("%A %d %B")
 
     system = (
         f"{PERSONALITY}\n\n"
         f"It's the evening wind-down. Tomorrow is {tomorrow}. Below is the user's current "
         "state. Write a short, calm end-of-day message that helps them mentally close out "
-        "today and tee up tomorrow: surface anything still OVERDUE worth clearing, what's "
-        "DUE TOMORROW, and tomorrow's reminders — i.e. what to have in mind before the next "
-        "day. Keep it brief and a touch reflective (it's evening, not a war room). Every item "
-        "must stay clear and accurate; don't invent or drop anything. If there's genuinely "
-        "nothing to prep, tell them to switch off and rest. No corporate filler, no sign-off."
+        "today and tee up tomorrow: if there's a focus scoreboard, open with it — celebrate "
+        "what got done, and note matter-of-factly what carries over to tomorrow's slate. Then "
+        "surface anything still OVERDUE worth clearing, what's DUE TOMORROW, and tomorrow's "
+        "reminders. If there's an overbooking heads-up for tomorrow, relay it and suggest "
+        "spreading things out. Keep it brief and a touch reflective (it's evening, not a war "
+        "room). Every item must stay clear and accurate; don't invent or drop anything. If "
+        "there's genuinely nothing to prep, tell them to switch off and rest. No corporate "
+        "filler, no sign-off."
     )
 
     try:

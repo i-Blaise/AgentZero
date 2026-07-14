@@ -44,6 +44,15 @@ disambiguation:
   original_tool str
   original_args dict
   created_at    datetime
+
+daily_focus  (one doc per local day — today's committed 3-4 task slate; see focus.py):
+  _id           ObjectId
+  chat_id       int
+  date          str "YYYY-MM-DD"  (local date, TIMEZONE)
+  task_ids      list[ObjectId]  — the slate; heartbeat nudges are fenced to these
+  carryover_ids list[ObjectId]  — subset inherited from the previous unfinished slate
+  overflow_ids  list[ObjectId]  — overdue/due-today tasks that did NOT make the slate
+  created_at    datetime
 """
 
 from typing import TypedDict, Optional, Any

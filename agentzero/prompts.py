@@ -61,6 +61,21 @@ async def build_system_prompt() -> str:
 
     snapshot = "\n".join(snapshot_lines) if snapshot_lines else "  (no projects yet)"
 
+    # Today's focus slate — read-only here (selection happens at the morning digest /
+    # heartbeat; building a prompt must never trigger it). Lazy import: prompts is imported
+    # widely and focus pulls in the LLM provider layer.
+    from agentzero import focus as focus_mod
+    focus_doc = await db.daily_focus.find_one({"date": today})
+    focus_section = "  (not set yet — it's chosen at the morning digest)"
+    if focus_doc:
+        overview = await focus_mod.focus_overview(focus_doc["chat_id"])
+        if overview and overview["lines"]:
+            focus_section = "\n".join(f"  {i + 1}. {ln}" for i, ln in enumerate(overview["lines"]))
+            if overview["overflow_lines"]:
+                focus_section += "\n  Due today but NOT in focus: " + "; ".join(
+                    overview["overflow_lines"]
+                )
+
     # Upcoming reminders — so "anything scheduled?" is answerable from context
     tz = ZoneInfo(TIMEZONE)
     reminders = (
@@ -134,6 +149,9 @@ Your evolving read on the user (YOUR inference from their activity — refine as
 Current store (projects + open tasks):
 {snapshot}
 
+Today's focus (the 3-4 tasks committed for today; carryovers and dues marked):
+{focus_section}
+
 Upcoming reminders:
 {rem_lines}
 
@@ -174,6 +192,7 @@ Rules:
   · To re-file later, call set_task_parent ("put X under Y", or omit the parent to make X standalone). "What's next on the deploy?" → name the goal's next open step. Completing a goal closes its steps; completing a goal's last step, the tool will offer to close the whole goal — relay that and wait for the user's yes.
 - Closing works either way: when the user says something is done or should go away ("done", "sorted that", "cancel that", "drop it"), just call complete_reminder (done) or cancel_reminder (drop) with their words — these now resolve against BOTH reminders and tasks, so you don't need to know which bucket it was in. Use mark_done for something you're sure is a task.
 - If you're adding one or more tasks to a project that doesn't exist yet, call create_project FIRST in the same turn (infer its scope), then add the tasks. Never make the user create the project manually, and never emit the same "project not found" failure repeatedly.
+- Daily focus: each morning a slate of 3-4 tasks is committed for the day — carryovers from yesterday first, then the most urgent. It's shown under "Today's focus" above; "what's my focus / what should I be doing today" is answered from there (or call set_daily_focus with no arguments for the live slate). When the user wants it changed — "add X to today's focus", "swap X in for Y", "drop Y for today" — call set_daily_focus. When add_task returns a heads-up (due today but slate full, or too many tasks piling on one date), RELAY it and act on the user's answer. When mark_done reports the slate cleared and suggests next tasks, relay the suggestions and wait — a suggestion only joins today's focus after the user says yes (then call set_daily_focus with add_task_query). Never add to the slate on your own initiative.
 - Recap of finished work: when the user asks what they've COMPLETED / got done / achieved over some period ("brief me on what I did this week", "what have I finished in the last two days", "weekly review"), call get_recap with the period converted to days. Present it as a short, encouraging brief in your voice — group by project, mention goal progress, and note anything that stands out (a big goal closed, a productive day). This is about FINISHED work; get_status is for what's still open — for "review my week" style asks it's fine to call both and contrast done vs still-outstanding.
 - The "Current store" and "Upcoming reminders" above are GROUND TRUTH. When the user asks what they have on (tasks, projects, what's scheduled, what's due), answer from that data. NEVER tell the user they have nothing unless those sections are genuinely empty. If you need fuller detail than the snapshot shows, call get_status or list_reminders rather than guessing.
 - For pure chitchat with no informational ask (greetings, banter), just reply conversationally — no tools needed.

@@ -231,7 +231,8 @@ adapter translates them and manages its own native multi-turn message format ins
 | `task_tree.py` | Pure helpers for the goal→step task tree (`build_forest`, `active_forest_lines`, progress) — one source of truth for tree rendering across snapshot/status/digest/board |
 | `prompts.py` | `build_system_prompt()` (injects date/time, store snapshot, reminders, memory) + `PERSONALITY` constant |
 | `scheduler.py` | APScheduler: one-off reminders, heartbeat interval, morning-digest cron |
-| `autonomy.py` | Proactive heartbeat — ranks open tasks by urgency, LLM picks ONE to nudge (or SILENT); suppresses only that task; spontaneous jittered spacing |
+| `autonomy.py` | Proactive heartbeat — ranks open tasks by urgency, fenced to today's focus slate, LLM picks ONE to nudge (or SILENT); suppresses only that task; spontaneous jittered spacing |
+| `focus.py` | Daily focus — commits the day's 3-4 task slate (carryovers first, LLM-judged fill), fences heartbeat nudges to it, discloses deadline overflow |
 | `digest.py` | Morning digest — daily rundown, always sends |
 | `mcp_client.py` | Generic MCP client — connect, namespace (`server__tool`), route calls |
 | `web.py` | Web search (Tavily/Brave/DuckDuckGo) + page fetch (httpx, dependency-free HTML→text). No DB writes. |
@@ -249,7 +250,8 @@ adapter translates them and manages its own native multi-turn message format ins
 
 ### Data model (MongoDB collections)
 `projects`, `tasks` (optional `parent_task_id` → goal/step tree), `events` (undo log), `chat_history` (last ~10 msgs/chat),
-`reminders`, `recurring_reminders` (cron-style repeating pings), `memory` (freeform facts),
+`reminders`, `recurring_reminders` (cron-style repeating pings), `daily_focus` (one doc per
+local day — today's committed 3-4 task slate; see focus.py), `memory` (freeform facts),
 `system_state` (last/next proactive-nudge time, nudge cadence, `last_app_scan_uid`),
 `seen_jobs`, `applications` (tracked job applications), `expenses` (logged from receipts),
 `momo_transactions` (full MoMo statement, verbatim), `profile`, `disambiguation` (unused stub). `system_state` also holds per-mailbox receipt scan
@@ -257,7 +259,7 @@ cursors (`receipt_cursor_<source>`) and the application scan cursor (`last_app_s
 
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `set_task_parent`, `update_task`, `snooze`,
-`get_status`, `get_recap`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
+`get_status`, `get_recap`, `set_daily_focus`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
 `complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
 `set_job_profile`, `find_jobs`, `web_search`, `web_fetch`, `list_applications`,
 `track_application`, `update_application`, `check_job_replies`, `list_expenses`,
@@ -387,7 +389,37 @@ fuzzy-matches the reply to a title, falling back to the top-ranked) so the next 
 to raise the next-urgent one — nudges trickle out one at a time. Spacing is spontaneous: after a
 nudge it records `next_proactive_at = now + random(NUDGE_MIN_GAP_MINUTES..NUDGE_MAX_GAP_MINUTES)`
 rather than a fixed cooldown. `HEARTBEAT_MINUTES` (the check cadence) must be ≤ `NUDGE_MIN_GAP_MINUTES`.
-The old `NUDGE_COOLDOWN_HOURS` is gone — replaced by the min/max gap pair.
+The old `NUDGE_COOLDOWN_HOURS` is gone — replaced by the min/max gap pair. Gap defaults raised
+30-150 → 45-180 on 2026-07-14 (owner asked for slightly fewer pings).
+
+**Daily focus (`focus.py`, added 2026-07-14):** each day commits a slate of 3-4 tasks
+(`daily_focus` collection, one doc per local date) and **heartbeat nudges are FENCED to that
+slate** — the fix for "four different projects pinged back-to-back". Mechanics:
+- **Selection** happens at the first `ensure_today_focus` of the day (normally the morning
+  digest; an early heartbeat also triggers it). Carryovers — still-open tasks from the previous
+  slate — keep their seats first; remaining seats fill from the urgency-ranked backlog (overdue →
+  due today → dated → most-stalled undated). The **LLM is consulted only when there's a real
+  choice** (candidates > 3): it judges which 3-vs-4 fit the day (weighs effort, deadlines, goals);
+  any LLM failure/garbage falls back to deterministic top-3. `allow_llm=False` forces the
+  deterministic path — the EXECUTOR always uses it (brain proposes, executor disposes).
+- **Actionable units**: a goal with open steps is represented by its steps, never itself.
+- **Overflow, never silence**: overdue/due-today tasks that miss the slate land in
+  `overflow_ids`; the morning digest discloses them with a swap offer, and they're first in line
+  for next-up suggestions. The slate never auto-expands past `MAX_SLATE = 4` — too many same-day
+  deadlines is surfaced as a scheduling conflict, not absorbed.
+- **Executor integrations**: `_do_close_task` appends a "that clears today's focus" + up-to-2
+  deterministic next-up suggestions when the last slate task closes (suggestions are OFFERS —
+  nothing joins the slate without the user's word, enforced by a prompt rule); `_add_task`
+  appends notices when a new task is due TODAY but the slate is set (offer to swap) or when a
+  date accumulates ≥4 open tasks (overbooking warning). `set_daily_focus` tool = the user's
+  explicit override: add / remove / swap (resolves both queries BEFORE mutating, so a failed
+  swap changes nothing); no args → show the slate.
+- **Surfaces**: system-prompt snapshot gets a "Today's focus" section (read-only — building a
+  prompt never triggers selection); morning digest leads with the slate; evening digest opens
+  with the scoreboard (done/total, what carries over) + an overbooked-tomorrow heads-up (>4 due).
+- **Timed reminders are unaffected** — the fence governs only self-initiated task nudges.
+- Testing note: focus's LLM patch point is `agentzero.focus.get_provider`; existing autonomy/
+  digest tests stay LLM-free because their small seeds (≤3 candidates) take the deterministic path.
 
 **Mission framing:** the system prompt frames the bot as genuinely invested in the user's
 productivity and EARNING — remember goals/clients/deadlines, prioritise by them, and don't
