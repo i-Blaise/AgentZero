@@ -151,6 +151,7 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "mark_done": _mark_done,
         "set_task_parent": _set_task_parent,
         "get_status": _get_status,
+        "get_recap": _get_recap,
         "update_task": _update_task,
         "snooze": _snooze,
         "set_reminder": _set_reminder,
@@ -333,7 +334,8 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
     now = datetime.utcnow()
     prev_state = dict(task)
     await db.tasks.update_one(
-        {"_id": task["_id"]}, {"$set": {"status": "done", "updated_at": now}}
+        {"_id": task["_id"]},
+        {"$set": {"status": "done", "completed_at": now, "updated_at": now}},
     )
     await _log_event(chat_id, "mark_done", "tasks", task["_id"], prev_state)
 
@@ -344,7 +346,8 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
     if open_steps:
         for s in open_steps:
             await db.tasks.update_one(
-                {"_id": s["_id"]}, {"$set": {"status": "done", "updated_at": now}}
+                {"_id": s["_id"]},
+                {"$set": {"status": "done", "completed_at": now, "updated_at": now}},
             )
             await _log_event(chat_id, "mark_done", "tasks", s["_id"], dict(s))
         n = len(open_steps)
@@ -523,6 +526,74 @@ async def _get_status(chat_id: int, args: dict) -> str:
         else:
             lines.append(f"{tag} {proj['name']} (no open tasks)")
 
+    return "\n".join(lines)
+
+
+def _finished_when(doc: dict) -> datetime:
+    """When a done item was actually finished, as naive UTC (tasks store naive datetimes,
+    reminders aware ones — normalise so the two sort together)."""
+    dt = doc.get("completed_at") or doc.get("updated_at") or doc.get("created_at")
+    return dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
+
+
+async def _get_recap(chat_id: int, args: dict) -> str:
+    """Everything the user finished in a recent window — completed tasks grouped by project
+    (steps shown under their goal) and reminders confirmed done. The brain narrates this."""
+    db = get_db()
+    try:
+        days = int(args.get("days") or 7)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 90))
+    # Tasks store naive-UTC datetimes; compare like with like.
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    # Tasks closed before completed_at existed (added 2026-07-14) fall back to updated_at,
+    # which for a done task is the moment it was marked done.
+    done_tasks = await db.tasks.find(
+        {
+            "status": "done",
+            "$or": [
+                {"completed_at": {"$gte": cutoff}},
+                {"completed_at": None, "updated_at": {"$gte": cutoff}},
+            ],
+        }
+    ).to_list(None)
+
+    done_reminders = [
+        r
+        for r in await db.reminders.find({"chat_id": chat_id, "status": "done"}).to_list(None)
+        if _finished_when(r) and _finished_when(r) >= cutoff
+    ]
+
+    period = "yesterday and today" if days <= 1 else f"the last {days} days"
+    if not done_tasks and not done_reminders:
+        return f"Nothing was marked done in {period}."
+
+    projects = {p["_id"]: p for p in await db.projects.find({}).to_list(None)}
+    titles = {t["_id"]: t["title"] for t in await db.tasks.find({}).to_list(None)}
+
+    lines: list[str] = [f"Completed in {period}:"]
+    if done_tasks:
+        n = len(done_tasks)
+        lines.append(f"Tasks — {n} done:")
+        by_project: dict = {}
+        for t in done_tasks:
+            by_project.setdefault(t.get("project_id"), []).append(t)
+        for pid, group in by_project.items():
+            proj = projects.get(pid)
+            label = f"[{proj['scope']}] {proj['name']}" if proj else "(no project)"
+            lines.append(f"  {label}")
+            for t in sorted(group, key=_finished_when, reverse=True):
+                when = _finished_when(t).strftime("%a %d %b")
+                parent = titles.get(t.get("parent_task_id"))
+                ctx = f" (step of \"{parent}\")" if parent else ""
+                lines.append(f"    ✓ {t['title']}{ctx} — {when}")
+    if done_reminders:
+        n = len(done_reminders)
+        lines.append(f"Reminders confirmed done — {n}:")
+        for r in sorted(done_reminders, key=_finished_when, reverse=True):
+            lines.append(f"  ✓ {r['text']} — {_finished_when(r).strftime('%a %d %b')}")
     return "\n".join(lines)
 
 

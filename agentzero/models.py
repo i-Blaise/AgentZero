@@ -16,6 +16,8 @@ tasks:
   due_date       datetime | None
   snoozed_until  datetime | None
   last_nudged_at datetime | None
+  completed_at   datetime | None  — set when marked done (added 2026-07-14; older done
+                                    rows lack it — recap falls back to updated_at)
   created_at     datetime
   updated_at     datetime
 
@@ -74,6 +76,7 @@ class TaskDoc(TypedDict, total=False):
     due_date: Optional[datetime]
     snoozed_until: Optional[datetime]
     last_nudged_at: Optional[datetime]
+    completed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
 

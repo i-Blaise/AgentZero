@@ -226,3 +226,29 @@ async def test_check_receipts_tool_no_double_send(mock_db):
         out = await execute_tool(CHAT_ID, _tc("check_receipts"))
     assert "no new receipts" in out.lower()
     mock_send.assert_not_called()
+
+
+def test_serialize_expense_momo_provenance():
+    """Momo rows expose momo_ref/reference/counterparty; non-momo rows get None (defensive)."""
+    from bson import ObjectId
+    now = datetime.now(timezone.utc)
+    momo = expenses.serialize_expense({
+        "_id": ObjectId(), "merchant": "Vanessa", "amount": 50, "currency": "GHS",
+        "category": "food", "description": "Transfer to Vanessa for Waakye",
+        "spent_at": now, "source": "momo", "momo_ref": "83739953756",
+        "reference": "G", "counterparty": "VANESSA MENNIA",
+    })
+    assert momo["momo_ref"] == "83739953756"
+    assert momo["reference"] == "G"
+    assert momo["counterparty"] == "VANESSA MENNIA"
+    plain = expenses.serialize_expense({
+        "_id": ObjectId(), "merchant": "Netflix", "amount": 9.99, "currency": "USD",
+        "category": "subscription", "spent_at": now, "source": "yahoo",
+    })
+    assert plain["momo_ref"] is None and plain["reference"] is None and plain["counterparty"] is None
+
+
+def test_transfers_category_registered():
+    """'transfers' is a first-class category (P2P sends), and charity stays for donations."""
+    assert "transfers" in expenses._CATEGORIES
+    assert "charity" in expenses._CATEGORIES

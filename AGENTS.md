@@ -108,6 +108,15 @@ purging a misread bank credit/transfer). `expenses.purge_scanned_expenses(chat_i
 email-sourced rows but keeps manual ones (used for a clean re-backfill). `/expenses` shows the
 month summary. Gated by `EXPENSE_TRACKING_ENABLED`; auto-scan needs an IMAP mailbox, manual
 add/delete work without one. The dashboard API stays read-only (no DELETE) — deletions are chat-only.
+**Categories & the charity bug**: `_CATEGORIES` includes `transfers` (P2P money sent to people whose
+purpose can't be inferred). `charity` is STRICTLY genuine donations to organisations — the retired
+d174136-era statement importer defaulted unknown P2P sends to "charity", polluting 22 rows (fixed by
+a description-based recategorisation backfill on 2026-07-12; the scan prompt now forbids it too).
+**MoMo provenance on expenses**: momo-sourced rows carry `momo_ref` (= raw statement `F_ID`),
+`reference` (the human-typed `REF` shorthand, alias-resolvable), and `counterparty` (`TO NAME` /
+alias name), all exposed by `serialize_expense` (null on non-momo rows). NOTE the naming trap:
+expense `momo_ref` = statement column `F_ID`; the statement column literally named `REF` is the
+typed shorthand, stored on expenses as `reference`.
 **MoMo statement import** (`statements.import_momo_statement`, tool `import_momo_statement`): finds the
 MoMo PDF in the inbox and saves the FULL statement FAITHFULLY into the `momo_transactions` collection.
 Uses `pdfplumber` (dep — must be `pip install`ed in the server venv; the deploy restarts but may not
@@ -248,7 +257,7 @@ cursors (`receipt_cursor_<source>`) and the application scan cursor (`last_app_s
 
 ### Tools the LLM can call
 Local: `create_project`, `add_task`, `mark_done`, `set_task_parent`, `update_task`, `snooze`,
-`get_status`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
+`get_status`, `get_recap`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
 `complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
 `set_job_profile`, `find_jobs`, `web_search`, `web_fetch`, `list_applications`,
 `track_application`, `update_application`, `check_job_replies`, `list_expenses`,
@@ -326,6 +335,15 @@ statuses: pending → awaiting_ack → done (or cancelled).
   (never the bare number — positional replies match nothing, there's no pending-choice state); and never
   ask the same clarifying question twice — on a second ambiguous result, surface the near-dupes and how
   they differ instead of re-asking.
+- **Completion recap** (`get_recap` / `_get_recap`): "brief me on what I completed this week / the last
+  2 days" → the model calls `get_recap(days)` (default 7, clamped 1–90). It lists tasks marked done in the
+  window grouped by project (steps annotated `step of "Goal"`, each with its finish day) plus reminders
+  confirmed done, and the model narrates it. `_do_close_task` now stamps `completed_at` on the task AND any
+  cascade-closed steps (naive UTC, like all task datetimes); done rows predating 2026-07-14 lack it, so the
+  recap query falls back to `updated_at` for them (`completed_at: None` matches missing too) — for a done
+  task that IS the closing moment. Reminders already had `completed_at` but store it timezone-AWARE, so the
+  recap filters those in Python (`_finished_when` normalises to naive) — a mixed-tz Mongo `$gte` would
+  misbehave under mongomock. Backward-looking only: `get_status` stays the "what's still open" view.
 - **Unified closing** — `_close_task` / `_close_reminders` are None-returning cores; `mark_done`,
   `complete_reminder`, and `cancel_reminder` each try their own store then FALL BACK to the other, so
   "done/cancel X" closes the thing whether it was a task or a reminder. Cross-fallback only fires when

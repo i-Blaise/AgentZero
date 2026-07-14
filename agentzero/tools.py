@@ -571,6 +571,30 @@ TOOLS: list[dict] = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "get_recap",
+        "description": (
+            "Brief the user on everything they COMPLETED over a recent period — tasks marked "
+            "done (with project and goal context) and reminders confirmed done, each with the "
+            "day it was finished. Use for 'what have I completed this week', 'brief me on the "
+            "last two days', 'what did I get done', 'weekly review'. Convert the period the "
+            "user names into days (default 7). This looks BACKWARD at finished work; for "
+            "what's still open, use get_status instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "description": (
+                        "How many days back to cover — e.g. 'today' → 1, 'last two days' → 2, "
+                        "'this week' → 7, 'this month' → 30. Default 7."
+                    ),
+                }
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "get_status",
         "description": "Get an overview of projects and their open tasks.",
         "parameters": {

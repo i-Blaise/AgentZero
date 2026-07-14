@@ -27,8 +27,12 @@ logger = logging.getLogger(__name__)
 
 _CATEGORIES = [
     "food", "transport", "shopping", "subscription", "bills",
-    "entertainment", "travel", "health", "charity", "other",
+    "entertainment", "travel", "health", "charity", "transfers", "other",
 ]
+# "transfers" = person-to-person money sent (MoMo sends to family/friends etc.) whose real
+# purpose can't be inferred. NEVER file P2P sends under "charity" — charity is strictly
+# genuine donations to organisations/causes. (The old statement importer defaulted unknown
+# P2P sends to charity, which polluted the dashboard; backfilled 2026-07-12.)
 
 
 def _aware(dt):
@@ -102,7 +106,8 @@ async def _classify(emails: list[dict]) -> list[dict]:
         "subscription payment, an invoice they paid. Extract merchant, amount (number only), "
         f"currency (3-letter ISO; infer from the symbol, default {DEFAULT_CURRENCY}), date "
         f"(YYYY-MM-DD if present), an expense_category from {_CATEGORIES} (infer it from the "
-        "merchant; use 'other' only when genuinely unclear), and a short description.\n"
+        "merchant; use 'other' only when genuinely unclear; 'charity' ONLY for a genuine donation "
+        "to an organisation/cause — never for money sent to a person), and a short description.\n"
         "- \"other\": everything that is NOT money the user spent.\n\n"
         "CRITICAL — bank / mobile-money transaction alerts (e.g. from a bank like CalBank): an "
         "expense is money paid to a THIRD-PARTY merchant for a good, service, or bill — NOT money "
@@ -441,6 +446,13 @@ def serialize_expense(r: dict) -> dict:
         "description": r.get("description", ""),
         "spent_at": sa.isoformat() if sa else None,
         "source": r.get("source"),
+        # MoMo provenance (source "momo" rows; None elsewhere): momo_ref = the statement's
+        # F_ID (unique txn id), reference = the human-typed REF shorthand on the transfer
+        # (e.g. "G" — an alias match informs the CATEGORY only), counterparty = the real
+        # recipient, verbatim from the statement's TO NAME.
+        "momo_ref": r.get("momo_ref"),
+        "reference": r.get("reference"),
+        "counterparty": r.get("counterparty"),
     }
 
 
