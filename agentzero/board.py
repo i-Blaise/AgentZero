@@ -1,9 +1,10 @@
 """
-Productivity board — structured read access to tasks + reminders for the dashboard API.
+Productivity board — structured read access to tasks for the dashboard API.
 
-What's on the table (open tasks, active reminders), what's done, and everything in between
-(snoozed tasks, fired-but-unconfirmed reminders). Read-only; the API just serializes these.
-Tasks/projects are global (single-user app); reminders are scoped by chat_id.
+Since the 2026-07-14 merge a "reminder" is a task with a remind_at; the /api/reminders
+surface is kept as a VIEW over timed tasks (same JSON shape as before, statuses derived
+back to the old pending/awaiting_ack lifecycle) so a deployed Cockpit keeps working.
+Read-only; the API just serializes these. Tasks/projects are global (single-user app).
 """
 from __future__ import annotations
 
@@ -12,7 +13,6 @@ from zoneinfo import ZoneInfo
 
 from agentzero.config import TIMEZONE
 from agentzero.db import get_db
-from agentzero.models import ACTIVE_REMINDER_STATUSES
 from agentzero.task_tree import build_forest
 
 
@@ -98,6 +98,9 @@ def serialize_task(
         "due_date": _iso(task.get("due_date")),
         "snoozed_until": _iso(task.get("snoozed_until")),
         "is_overdue": is_overdue,
+        # Timed ping (None for a plain task); reminded_at set → fired, awaiting confirmation.
+        "remind_at": _iso(task.get("remind_at")),
+        "reminded_at": _iso(task.get("reminded_at")),
         "created_at": _iso(task.get("created_at")),
         "updated_at": _iso(task.get("updated_at")),
     }
@@ -131,45 +134,56 @@ def task_status_counts(tasks: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Reminders
+# Reminders — a compatibility VIEW over tasks that carry a remind_at
 # ---------------------------------------------------------------------------
 
+def _reminder_status(t: dict) -> str:
+    """A timed task's status translated back to the old reminder lifecycle, so the
+    /api/reminders payload keeps its pre-merge vocabulary for deployed consumers."""
+    if t.get("status") == "open":
+        return "awaiting_ack" if t.get("reminded_at") else "pending"
+    return t.get("status") or "pending"  # done | cancelled | snoozed
+
+
 async def query_reminders(chat_id: int, status: str | None = None) -> list[dict]:
+    """Timed tasks, soonest ping first. `status` accepts the old reminder vocabulary
+    (pending/awaiting_ack/done/cancelled) or the 'active' pseudo-status. chat_id is kept
+    for signature compatibility (tasks are global — single-user app)."""
     db = get_db()
-    q: dict = {"chat_id": chat_id}
-    if status == "active":  # pseudo-status: everything still open (incl. legacy "fired")
-        q["status"] = {"$in": ACTIVE_REMINDER_STATUSES}
+    rows = [
+        t for t in await db.tasks.find({}).to_list(None)
+        if t.get("remind_at") is not None
+    ]
+    if status == "active":
+        rows = [t for t in rows if t.get("status") == "open"]
     elif status:
-        q["status"] = status
-    rows = await db.reminders.find(q).to_list(None)
-    rows.sort(key=lambda r: _aware(r.get("fire_at")) or datetime.min.replace(tzinfo=timezone.utc))
+        rows = [t for t in rows if _reminder_status(t) == status]
+    rows.sort(key=lambda t: _aware(t.get("remind_at")) or datetime.min.replace(tzinfo=timezone.utc))
     return rows
 
 
-def serialize_reminder(r: dict) -> dict:
+def serialize_reminder(t: dict) -> dict:
+    """Same JSON shape as before the merge (text/fire_at/fired_at…), sourced from a task."""
+    status = _reminder_status(t)
     return {
-        "id": str(r.get("_id")),
-        "text": r.get("text"),
-        "status": r.get("status"),
-        # Fired-but-unconfirmed. Includes the legacy "fired" status (pre-awaiting_ack
-        # lifecycle) — those are semantically the same "waiting on the user's word" state
-        # and are closeable/cancellable just like awaiting_ack.
-        "awaiting_ack": r.get("status") in ("awaiting_ack", "fired"),
-        # Mirrors the executor's definition of active (pending/awaiting_ack/fired).
-        "is_active": r.get("status") in ACTIVE_REMINDER_STATUSES,
-        "fire_at": _iso(r.get("fire_at")),
-        "fired_at": _iso(r.get("fired_at")),
-        "next_nudge_at": _iso(r.get("next_nudge_at")),
-        "completed_at": _iso(r.get("completed_at")),
-        "created_at": _iso(r.get("created_at")),
-        "nudge_count": r.get("nudge_count") or 0,
+        "id": str(t.get("_id")),
+        "text": t.get("title"),
+        "status": status,
+        "awaiting_ack": status == "awaiting_ack",
+        "is_active": t.get("status") == "open",
+        "fire_at": _iso(t.get("remind_at")),
+        "fired_at": _iso(t.get("reminded_at")),
+        "next_nudge_at": _iso(t.get("next_nudge_at")),
+        "completed_at": _iso(t.get("completed_at")),
+        "created_at": _iso(t.get("created_at")),
+        "nudge_count": t.get("nudge_count") or 0,
     }
 
 
 def reminder_status_counts(rows: list[dict]) -> dict:
     counts: dict[str, int] = {}
-    for r in rows:
-        s = r.get("status", "pending")
+    for t in rows:
+        s = _reminder_status(t)
         counts[s] = counts.get(s, 0) + 1
     return counts
 
@@ -247,7 +261,7 @@ async def overview(chat_id: int) -> dict:
     return {
         "tasks": task_status_counts([t for t, _ in task_items]),
         "reminders": reminder_status_counts(reminders),
-        "reminders_active": sum(1 for r in reminders if r.get("status") in ACTIVE_REMINDER_STATUSES),
+        "reminders_active": sum(1 for r in reminders if r.get("status") == "open"),
         "goals": {
             "count": len(goal_nodes),
             "steps_done": sum(n["done"] for n in goal_nodes),

@@ -1,8 +1,10 @@
 """
-APScheduler — runs one-off reminders now; digest cron jobs land here in Phase 3.
+APScheduler — timed pings, follow-up nags, and all the cron jobs (digests, scans).
 
-Reminders are persisted in MongoDB (`reminders` collection) and re-loaded on
-startup, so a restart never drops a pending reminder.  Times are stored in UTC.
+Since the 2026-07-14 tasks/reminders merge, a "reminder" is a TASK with a remind_at
+(tasks collection, naive-UTC datetimes like every other task field). Pings are re-loaded
+from Mongo on startup, so a restart never drops one. Job ids keep the old "reminder:<id>"
+format so jobs scheduled before a deploy are still found.
 """
 from __future__ import annotations
 
@@ -105,81 +107,84 @@ async def _phrase_reminder(text: str) -> str:
 # messages still sitting in the chat history keep working if tapped.
 
 
-async def _fire_reminder(reminder_id: str, chat_id: int, text: str) -> None:
+async def _fire_reminder(task_id: str, chat_id: int, text: str) -> None:
+    """Fire a task's timed ping. The task stays OPEN — reminded_at set means "fired,
+    awaiting the user's confirmation" and the follow-up loop nags until it's closed."""
     try:
         db = get_db()
-        # Guard: never resurrect a reminder the user already closed. If a stale/duplicate
-        # job fires for one that's been completed or cancelled, do nothing.
-        current = await db.reminders.find_one({"_id": ObjectId(reminder_id)})
-        if current and current.get("status") not in ("pending", None):
+        # Guard: never ping for a task that's been closed/cancelled (or deleted by /undo),
+        # and never double-fire one that already pinged.
+        current = await db.tasks.find_one({"_id": ObjectId(task_id)})
+        if not current or current.get("status") != "open" or current.get("reminded_at"):
             return
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         gap = await _followup_minutes(chat_id)
         await send(chat_id, await _phrase_reminder(text))
-        # Don't mark done — await the user's confirmation. It moves to awaiting_ack
-        # and the follow-up loop keeps nudging until the user says it's handled.
-        await db.reminders.update_one(
-            {"_id": ObjectId(reminder_id)},
+        # last_nudged_at too, so the autonomy heartbeat's 24h suppression won't pile a
+        # second opportunistic nudge on top of the ping.
+        await db.tasks.update_one(
+            {"_id": ObjectId(task_id)},
             {
                 "$set": {
-                    "status": "awaiting_ack",
-                    "fired_at": now,
+                    "reminded_at": now,
                     "next_nudge_at": now + timedelta(minutes=gap),
                     "nudge_count": 0,
+                    "last_nudged_at": now,
                 }
             },
         )
     except Exception:
-        logger.exception("Failed to fire reminder %s", reminder_id)
+        logger.exception("Failed to fire reminder %s", task_id)
 
 
 async def _reminder_followup_job(chat_id: int) -> None:
-    """Re-nudge unconfirmed reminders ONE AT A TIME — at most one per wake, the most
-    overdue first. A backlog trickles out across cycles instead of dumping at once.
-    Quiet-hours aware."""
+    """Re-nudge fired-but-unconfirmed timed tasks ONE AT A TIME — at most one per wake,
+    the most overdue first. A backlog trickles out across cycles instead of dumping at
+    once. Quiet-hours aware."""
     from agentzero.autonomy import _in_quiet_hours
 
     db = get_db()
-    now = datetime.now(timezone.utc)
-    if _in_quiet_hours(now.astimezone(ZoneInfo(TIMEZONE))):
+    now = datetime.utcnow()
+    if _in_quiet_hours(now.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(TIMEZONE))):
         return
 
-    awaiting = await db.reminders.find(
-        {"chat_id": chat_id, "status": "awaiting_ack"}
+    awaiting = await db.tasks.find(
+        {"status": "open", "reminded_at": {"$ne": None}}
     ).to_list(None)
 
     due = []
-    for r in awaiting:
-        nxt = r.get("next_nudge_at")
-        if nxt and nxt.tzinfo is None:
-            nxt = nxt.replace(tzinfo=timezone.utc)
+    for t in awaiting:
+        nxt = t.get("next_nudge_at")
+        if nxt and nxt.tzinfo:
+            nxt = nxt.replace(tzinfo=None)
         if nxt and nxt > now:
             continue
-        due.append((r, nxt or now))
+        due.append((t, nxt or now))
     if not due:
         return
 
     # Send only the single most-overdue one this cycle; the rest wait for later wakes.
     due.sort(key=lambda x: x[1])
-    r = due[0][0]
+    t = due[0][0]
     try:
         await send(
             chat_id,
             await _phrase_reminder(
-                f"{r['text']} (still not marked done — tell me when it's handled)"
+                f"{t['title']} (still not marked done — tell me when it's handled)"
             ),
         )
     except Exception:
-        logger.exception("Follow-up nudge failed for reminder %s", r["_id"])
+        logger.exception("Follow-up nudge failed for reminder %s", t["_id"])
         return
 
     gap = await _followup_minutes(chat_id)
-    await db.reminders.update_one(
-        {"_id": r["_id"]},
+    await db.tasks.update_one(
+        {"_id": t["_id"]},
         {
             "$set": {
-                "nudge_count": r.get("nudge_count", 0) + 1,
+                "nudge_count": t.get("nudge_count", 0) + 1,
                 "next_nudge_at": now + timedelta(minutes=gap),
+                "last_nudged_at": now,
             }
         },
     )
@@ -451,18 +456,26 @@ def schedule_evening_digest(chat_id: int) -> None:
     )
 
 
-async def load_pending_reminders() -> None:
-    """Re-schedule every still-pending reminder after a restart."""
+async def load_pending_reminders(chat_id: int) -> None:
+    """Re-schedule every not-yet-fired timed ping after a restart. Ones that came due
+    while we were down fire immediately. (Tasks are global — single-user app — so the
+    owner chat_id comes from the caller.)"""
     db = get_db()
-    now = datetime.now(timezone.utc)
-    pending = await db.reminders.find({"status": "pending"}).to_list(None)
-    for r in pending:
-        fire_at = r["fire_at"]
-        if fire_at.tzinfo is None:
-            fire_at = fire_at.replace(tzinfo=timezone.utc)
-        if fire_at <= now:
-            await _fire_reminder(str(r["_id"]), r["chat_id"], r["text"])
+    now = datetime.utcnow()
+    rows = await db.tasks.find(
+        {"status": "open", "remind_at": {"$ne": None}}
+    ).to_list(None)
+    pending = [t for t in rows if not t.get("reminded_at")]
+    for t in pending:
+        remind_at = t["remind_at"]
+        if remind_at.tzinfo:
+            remind_at = remind_at.replace(tzinfo=None)
+        if remind_at <= now:
+            await _fire_reminder(str(t["_id"]), chat_id, t["title"])
         else:
-            schedule_reminder(str(r["_id"]), r["chat_id"], r["text"], fire_at)
+            schedule_reminder(
+                str(t["_id"]), chat_id, t["title"],
+                remind_at.replace(tzinfo=timezone.utc),
+            )
     if pending:
         logger.info("Re-loaded %d pending reminder(s)", len(pending))

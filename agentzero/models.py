@@ -12,14 +12,27 @@ tasks:
   _id            ObjectId
   project_id     ObjectId  (ref → projects._id)
   title          str
-  status         "open" | "done" | "snoozed"
+  status         "open" | "done" | "snoozed" | "cancelled"
   due_date       datetime | None
   snoozed_until  datetime | None
   last_nudged_at datetime | None
   completed_at   datetime | None  — set when marked done (added 2026-07-14; older done
                                     rows lack it — recap falls back to updated_at)
+  remind_at      datetime | None  — timed ping (merged from the old reminders collection,
+                                    2026-07-14): when set, the scheduler pings the user at
+                                    this moment and the follow-up loop nags until the task
+                                    is closed. None → a plain task (opportunistic nudges
+                                    only). All naive UTC like every other task datetime.
+  reminded_at    datetime | None  — when the timed ping actually fired; set + still open
+                                    means "fired, awaiting the user's confirmation"
+  next_nudge_at  datetime | None  — when the follow-up loop may nag again
+  nudge_count    int              — follow-up nags sent since the ping fired
   created_at     datetime
   updated_at     datetime
+
+  Tasks with a remind_at that were migrated from the old `reminders` collection keep
+  their ORIGINAL ObjectId (so old inline-button callbacks still resolve) and carry
+  migrated_from: "reminders". The old collection is left in place as a backup.
 
 events  (undo log):
   _id          ObjectId
@@ -59,10 +72,9 @@ from typing import TypedDict, Optional, Any
 from datetime import datetime
 
 
-# A reminder is "active" (still closeable / nag-able / listable) in any of these states.
-# "fired" is a legacy state from an older lifecycle (pre-awaiting_ack); we keep it so those
-# orphaned reminders stay visible and closeable instead of becoming un-killable ghosts.
-# Single source of truth — used by the executor (complete/cancel/list) and the board API.
+# Statuses from the LEGACY reminders collection that map to an OPEN task when migrated
+# (2026-07-14 merge). "fired" is from an even older lifecycle (pre-awaiting_ack). Kept only
+# for the migration and for reading unmigrated legacy data — new code queries tasks.
 ACTIVE_REMINDER_STATUSES = ["pending", "awaiting_ack", "fired"]
 
 
@@ -86,6 +98,10 @@ class TaskDoc(TypedDict, total=False):
     snoozed_until: Optional[datetime]
     last_nudged_at: Optional[datetime]
     completed_at: Optional[datetime]
+    remind_at: Optional[datetime]
+    reminded_at: Optional[datetime]
+    next_nudge_at: Optional[datetime]
+    nudge_count: int
     created_at: datetime
     updated_at: datetime
 

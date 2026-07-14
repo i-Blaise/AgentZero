@@ -88,20 +88,23 @@ async def test_recap_shows_goal_context_and_project(mock_db):
 
 
 @pytest.mark.asyncio
-async def test_recap_includes_completed_reminders(mock_db):
-    now = datetime.now(timezone.utc)
-    await mock_db.reminders.insert_one(
-        {"chat_id": CHAT_ID, "text": "call the bank", "status": "done",
-         "fire_at": now - timedelta(days=1), "completed_at": now - timedelta(days=1)}
-    )
-    await mock_db.reminders.insert_one(
-        {"chat_id": CHAT_ID, "text": "old errand", "status": "done",
-         "fire_at": now - timedelta(days=20), "completed_at": now - timedelta(days=20)}
-    )
-    await mock_db.reminders.insert_one(
-        {"chat_id": CHAT_ID, "text": "still pending", "status": "pending",
-         "fire_at": now + timedelta(days=1)}
-    )
+async def test_recap_includes_completed_timed_tasks(mock_db):
+    """Timed pings are tasks since the merge — confirmed ones land in the recap like any
+    other done task, still-pending and out-of-window ones don't."""
+    now = datetime.utcnow()
+
+    async def _timed(title, status, days_ago):
+        await mock_db.tasks.insert_one(
+            {"project_id": None, "parent_task_id": None, "title": title, "status": status,
+             "remind_at": now - timedelta(days=days_ago),
+             "completed_at": now - timedelta(days=days_ago) if status == "done" else None,
+             "created_at": now - timedelta(days=days_ago + 1),
+             "updated_at": now - timedelta(days=days_ago)}
+        )
+
+    await _timed("call the bank", "done", 1)
+    await _timed("old errand", "done", 20)
+    await _timed("still pending", "open", -1)
     out = await execute_tool(CHAT_ID, _tc("get_recap", days=7))
     assert "call the bank" in out
     assert "old errand" not in out

@@ -18,9 +18,6 @@ from bson import ObjectId
 from agentzero.config import TIMEZONE
 from agentzero.db import get_db
 from agentzero.llm import ToolCall
-# Which reminder states are still "active" (closeable / nag-able / listable) — includes the
-# legacy "fired" status. Defined in models.py so the board API shares the same definition.
-from agentzero.models import ACTIVE_REMINDER_STATUSES as _ACTIVE_REMINDER_STATUSES
 from agentzero.task_tree import active_forest_lines
 
 
@@ -119,6 +116,43 @@ async def _fuzzy_project(name: str) -> dict | None:
     return best if _sim(name, best["name"]) >= 0.4 else None
 
 
+async def ensure_inbox_project() -> dict:
+    """The catch-all "Inbox" project — home for tasks that don't name a project (typically
+    timed pings: "remind me at 4 to buy gas"). Created on first use; the user can re-file
+    its tasks into real projects later. Also used by the reminders→tasks migration."""
+    db = get_db()
+    existing = await db.projects.find_one({"name": {"$regex": "^inbox$", "$options": "i"}})
+    if existing:
+        return existing
+    now = datetime.utcnow()
+    doc = {"name": "Inbox", "scope": "personal", "created_at": now, "updated_at": now}
+    result = await db.projects.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return doc
+
+
+def _unschedule_ping(task_id) -> None:
+    """Best-effort removal of a task's scheduled timed-ping job (id format shared with the
+    pre-merge reminders, so jobs scheduled before a deploy are still found)."""
+    try:
+        from agentzero.scheduler import get_scheduler
+
+        get_scheduler().remove_job(f"reminder:{task_id}")
+    except Exception:
+        pass
+
+
+def _local_to_naive_utc(local: datetime) -> datetime:
+    """A naive local-time datetime → naive UTC (tasks store naive-UTC datetimes)."""
+    return local.replace(tzinfo=ZoneInfo(TIMEZONE)).astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _fmt_local(naive_utc: datetime) -> str:
+    """A stored naive-UTC datetime rendered as local wall-clock for messages."""
+    local = naive_utc.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(TIMEZONE))
+    return local.strftime("%a %d %b, %H:%M")
+
+
 async def _log_event(
     chat_id: int,
     operation: str,
@@ -155,11 +189,9 @@ async def execute_tool(chat_id: int, tc: ToolCall) -> str:
         "set_daily_focus": _set_daily_focus,
         "update_task": _update_task,
         "snooze": _snooze,
-        "set_reminder": _set_reminder,
+        "cancel_task": _cancel_task,
         "set_recurring_reminder": _set_recurring_reminder,
         "list_reminders": _list_reminders,
-        "cancel_reminder": _cancel_reminder,
-        "complete_reminder": _complete_reminder,
         "snooze_reminder": _snooze_reminder,
         "set_reminder_cadence": _set_reminder_cadence,
         "remember": _remember,
@@ -265,16 +297,37 @@ async def _match_goal(query: str, project_id, exclude_id=None) -> tuple[dict | N
 
 async def _add_task(chat_id: int, args: dict) -> str:
     db = get_db()
-    project = await _fuzzy_project(args["project_name"])
-    if not project:
-        return f'Project "{args["project_name"]}" not found. Create it first.'
+    # No project named → the Inbox catch-all (the "remind me to buy gas" case; the user
+    # shouldn't have to invent a project for a simple timed ping).
+    if pname := (args.get("project_name") or "").strip():
+        project = await _fuzzy_project(pname)
+        if not project:
+            return f'Project "{pname}" not found. Create it first.'
+    else:
+        project = await ensure_inbox_project()
 
     title = args["title"].strip()
+
+    # Optional timed ping: "remind me at 4 to X" is a task with a remind_at.
+    remind_at: datetime | None = None
+    if raw := (args.get("remind_at") or "").strip():
+        remind_local = _parse_datetime(raw)
+        if not remind_local:
+            return f'Could not understand the time "{raw}".'
+        remind_at = _local_to_naive_utc(remind_local)
+        if remind_at <= datetime.utcnow():
+            return "That time is already in the past — give me a future time."
+
     due_date: datetime | None = None
     if raw := args.get("due_date"):
         due_date = _parse_date(raw)
         if not due_date:
             return f'Could not parse date "{raw}". Use YYYY-MM-DD.'
+    if due_date is None and remind_at is not None:
+        # A timed ping implies its day is the deadline — lets due/overdue/focus logic
+        # treat it like any other dated task.
+        local = remind_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(TIMEZONE))
+        due_date = datetime(local.year, local.month, local.day)
 
     # Optionally file this task as a STEP under an existing goal.
     parent = None
@@ -287,15 +340,27 @@ async def _add_task(chat_id: int, args: dict) -> str:
     # Dedup guard: never silently create a second near-identical task under the SAME parent
     # in the same project (a common double-fire when the brain hedges). Scoped by parent, so
     # the same step title under two different goals is allowed. Deterministic — the model
-    # can't talk its way past this.
+    # can't talk its way past this. With a remind_at in play: a matching task that already
+    # has a ping within 5 min is a duplicate; one WITHOUT a ping gets this ping attached
+    # instead of a twin task; pings at genuinely different times ("at 9 and again at 5")
+    # are allowed to coexist as separate tasks.
     existing = await db.tasks.find(
         {"project_id": project["_id"], "status": {"$in": ["open", "snoozed"]},
          "parent_task_id": parent_id}
     ).to_list(None)
     for t in existing:
-        if _sim(title, t["title"]) >= 0.85:
-            where = f'under "{parent["title"]}"' if parent else f"in {project['name']}"
+        if _sim(title, t["title"]) < 0.85:
+            continue
+        where = f'under "{parent["title"]}"' if parent else f"in {project['name']}"
+        if remind_at is None:
             return f'You already have "{t["title"]}" {where} — not adding a duplicate.'
+        t_remind = t.get("remind_at")
+        if t_remind is None:
+            return await _attach_ping(chat_id, t, remind_at)
+        if abs((t_remind - remind_at).total_seconds()) <= 300:
+            return (f'You\'ve already got a ping for "{t["title"]}" around '
+                    f"{_fmt_local(t_remind)} — not adding a duplicate.")
+        # Same text, deliberately different time → a second task is intended.
 
     now = datetime.utcnow()
     result = await db.tasks.insert_one(
@@ -307,16 +372,48 @@ async def _add_task(chat_id: int, args: dict) -> str:
             "due_date": due_date,
             "snoozed_until": None,
             "last_nudged_at": None,
+            "remind_at": remind_at,
             "created_at": now,
             "updated_at": now,
         }
     )
     await _log_event(chat_id, "add_task", "tasks", result.inserted_id, None)
-    due_str = f" (due {due_date.strftime('%Y-%m-%d')})" if due_date else ""
-    notes = await _new_task_focus_notes(chat_id, result.inserted_id, due_date)
+    if remind_at is not None:
+        from agentzero.scheduler import schedule_reminder
+
+        schedule_reminder(
+            str(result.inserted_id), chat_id, title,
+            remind_at.replace(tzinfo=timezone.utc),
+        )
+
+    due_str = f" (due {due_date.strftime('%Y-%m-%d')})" if due_date and not remind_at else ""
+    ping_str = f" — I'll ping you at {_fmt_local(remind_at)}" if remind_at else ""
+    # Timed tasks don't take focus-slate seats (their ping is guaranteed), so the
+    # slate-pressure heads-ups don't apply to them.
+    notes = "" if remind_at else await _new_task_focus_notes(chat_id, result.inserted_id, due_date)
     if parent:
-        return f'Added "{title}" as a step under "{parent["title"]}"{due_str}.{notes}'
-    return f'Added "{title}" to {project["name"]}{due_str}.{notes}'
+        return f'Added "{title}" as a step under "{parent["title"]}"{due_str}{ping_str}.{notes}'
+    return f'Added "{title}" to {project["name"]}{due_str}{ping_str}.{notes}'
+
+
+async def _attach_ping(chat_id: int, task: dict, remind_at: datetime) -> str:
+    """Attach a timed ping to an EXISTING task instead of creating a near-duplicate twin
+    ("remind me at 4 to deploy the hotfix" when "deploy the hotfix" is already tracked)."""
+    from agentzero.scheduler import schedule_reminder
+
+    db = get_db()
+    prev = dict(task)
+    updates: dict[str, Any] = {"remind_at": remind_at, "updated_at": datetime.utcnow()}
+    if task.get("due_date") is None:
+        local = remind_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(TIMEZONE))
+        updates["due_date"] = datetime(local.year, local.month, local.day)
+    await db.tasks.update_one({"_id": task["_id"]}, {"$set": updates})
+    await _log_event(chat_id, "update_task", "tasks", task["_id"], prev)
+    schedule_reminder(
+        str(task["_id"]), chat_id, task["title"], remind_at.replace(tzinfo=timezone.utc)
+    )
+    return (f'"{task["title"]}" is already on the list — I\'ll ping you about it at '
+            f"{_fmt_local(remind_at)} instead of adding a twin.")
 
 
 async def _new_task_focus_notes(chat_id: int, task_id, due_date) -> str:
@@ -342,6 +439,8 @@ async def _new_task_focus_notes(chat_id: int, task_id, due_date) -> str:
 
     same_day = 0
     for t in await db.tasks.find({"status": "open"}).to_list(None):
+        if t.get("remind_at") is not None:
+            continue  # timed tasks don't take slate seats — not slate pressure
         td = t.get("due_date")
         if td is not None and (td.date() if hasattr(td, "date") else td) == d:
             same_day += 1
@@ -394,11 +493,14 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
     db = get_db()
     now = datetime.utcnow()
     prev_state = dict(task)
+    # Closing also silences any timed ping: clear the nag state and drop the scheduled job.
     await db.tasks.update_one(
         {"_id": task["_id"]},
-        {"$set": {"status": "done", "completed_at": now, "updated_at": now}},
+        {"$set": {"status": "done", "completed_at": now, "updated_at": now,
+                  "next_nudge_at": None}},
     )
     await _log_event(chat_id, "mark_done", "tasks", task["_id"], prev_state)
+    _unschedule_ping(task["_id"])
     closed_ids = [task["_id"]]
 
     # This task is a GOAL → cascade-close its remaining open steps.
@@ -409,9 +511,11 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
         for s in open_steps:
             await db.tasks.update_one(
                 {"_id": s["_id"]},
-                {"$set": {"status": "done", "completed_at": now, "updated_at": now}},
+                {"$set": {"status": "done", "completed_at": now, "updated_at": now,
+                          "next_nudge_at": None}},
             )
             await _log_event(chat_id, "mark_done", "tasks", s["_id"], dict(s))
+            _unschedule_ping(s["_id"])
             closed_ids.append(s["_id"])
         n = len(open_steps)
         msg = f'Done: "{task["title"]}" — and closed its {n} open step{"" if n == 1 else "s"} too.'
@@ -432,8 +536,7 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
 
 async def _close_task(chat_id: int, query: str) -> str | None:
     """Close a single matching open task. Returns a message on success or on an ambiguous
-    (>1) match; returns None when NO task matched, so callers can fall back to reminders
-    (unified closing — the user shouldn't need to know which bucket a thing landed in)."""
+    (>1) match; returns None when NO task matched."""
     matches = await _fuzzy_tasks(query)
     if not matches:
         return None
@@ -448,11 +551,7 @@ async def _mark_done(chat_id: int, args: dict) -> str:
     task_msg = await _close_task(chat_id, query)
     if task_msg is not None:
         return task_msg
-    # Unified closing: no task matched — maybe the user is closing a REMINDER.
-    rem_msg = await _close_reminders(chat_id, query)
-    if rem_msg is not None:
-        return rem_msg
-    return f'No open task or reminder matching "{query}".'
+    return f'No open task matching "{query}".'
 
 
 async def _set_task_parent(chat_id: int, args: dict) -> str:
@@ -460,7 +559,7 @@ async def _set_task_parent(chat_id: int, args: dict) -> str:
     ("make X its own task"). Omit parent_task_query to detach."""
     db = get_db()
     matches = await _fuzzy_tasks(args["task_query"], status=None)
-    matches = [m for m in matches if m["status"] != "done"]
+    matches = [m for m in matches if m["status"] not in ("done", "cancelled")]
     if not matches:
         return f'No active task matching "{args["task_query"]}".'
     if len(matches) > 1:
@@ -554,7 +653,7 @@ async def _update_task(chat_id: int, args: dict) -> str:
     db = get_db()
     query = args["task_query"]
     matches = await _fuzzy_tasks(query, status=None)
-    matches = [m for m in matches if m["status"] != "done"]
+    matches = [m for m in matches if m["status"] not in ("done", "cancelled")]
 
     if not matches:
         return f'No active task matching "{query}".'
@@ -649,15 +748,16 @@ async def _get_status(chat_id: int, args: dict) -> str:
 
 
 def _finished_when(doc: dict) -> datetime:
-    """When a done item was actually finished, as naive UTC (tasks store naive datetimes,
-    reminders aware ones — normalise so the two sort together)."""
+    """When a done item was actually finished, as naive UTC (tolerates aware datetimes on
+    rows migrated from the old reminders collection — normalise so everything sorts together)."""
     dt = doc.get("completed_at") or doc.get("updated_at") or doc.get("created_at")
     return dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
 
 
 async def _get_recap(chat_id: int, args: dict) -> str:
     """Everything the user finished in a recent window — completed tasks grouped by project
-    (steps shown under their goal) and reminders confirmed done. The brain narrates this."""
+    (steps shown under their goal). Timed pings are tasks too since the 2026-07-14 merge,
+    so confirmed reminders show up here as done tasks. The brain narrates this."""
     db = get_db()
     try:
         days = int(args.get("days") or 7)
@@ -679,106 +779,49 @@ async def _get_recap(chat_id: int, args: dict) -> str:
         }
     ).to_list(None)
 
-    done_reminders = [
-        r
-        for r in await db.reminders.find({"chat_id": chat_id, "status": "done"}).to_list(None)
-        if _finished_when(r) and _finished_when(r) >= cutoff
-    ]
-
     period = "yesterday and today" if days <= 1 else f"the last {days} days"
-    if not done_tasks and not done_reminders:
+    if not done_tasks:
         return f"Nothing was marked done in {period}."
 
     projects = {p["_id"]: p for p in await db.projects.find({}).to_list(None)}
     titles = {t["_id"]: t["title"] for t in await db.tasks.find({}).to_list(None)}
 
-    lines: list[str] = [f"Completed in {period}:"]
-    if done_tasks:
-        n = len(done_tasks)
-        lines.append(f"Tasks — {n} done:")
-        by_project: dict = {}
-        for t in done_tasks:
-            by_project.setdefault(t.get("project_id"), []).append(t)
-        for pid, group in by_project.items():
-            proj = projects.get(pid)
-            label = f"[{proj['scope']}] {proj['name']}" if proj else "(no project)"
-            lines.append(f"  {label}")
-            for t in sorted(group, key=_finished_when, reverse=True):
-                when = _finished_when(t).strftime("%a %d %b")
-                parent = titles.get(t.get("parent_task_id"))
-                ctx = f" (step of \"{parent}\")" if parent else ""
-                lines.append(f"    ✓ {t['title']}{ctx} — {when}")
-    if done_reminders:
-        n = len(done_reminders)
-        lines.append(f"Reminders confirmed done — {n}:")
-        for r in sorted(done_reminders, key=_finished_when, reverse=True):
-            lines.append(f"  ✓ {r['text']} — {_finished_when(r).strftime('%a %d %b')}")
+    n = len(done_tasks)
+    lines: list[str] = [f"Completed in {period}:", f"Tasks — {n} done:"]
+    by_project: dict = {}
+    for t in done_tasks:
+        by_project.setdefault(t.get("project_id"), []).append(t)
+    for pid, group in by_project.items():
+        proj = projects.get(pid)
+        label = f"[{proj['scope']}] {proj['name']}" if proj else "(no project)"
+        lines.append(f"  {label}")
+        for t in sorted(group, key=_finished_when, reverse=True):
+            when = _finished_when(t).strftime("%a %d %b")
+            parent = titles.get(t.get("parent_task_id"))
+            ctx = f" (step of \"{parent}\")" if parent else ""
+            lines.append(f"    ✓ {t['title']}{ctx} — {when}")
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Reminders
+# Timed pings ("reminders") — tasks with a remind_at, since the 2026-07-14 merge.
+# One entity: the same task shows in status/focus/recap AND pings at its time.
 # ---------------------------------------------------------------------------
 
-async def _set_reminder(chat_id: int, args: dict) -> str:
-    from agentzero.scheduler import schedule_reminder
-
-    text = args["text"].strip()
-    fire_local = _parse_datetime(args["fire_at"])
-    if not fire_local:
-        return f'Could not understand the time "{args["fire_at"]}".'
-
-    tz = ZoneInfo(TIMEZONE)
-    fire_utc = fire_local.replace(tzinfo=tz).astimezone(timezone.utc)
-    now_utc = datetime.now(timezone.utc)
-    if fire_utc <= now_utc:
-        return "That time is already in the past — give me a future time."
-
+async def _timed_tasks(open_only: bool = True) -> list[dict]:
+    """Tasks carrying a timed ping, soonest first. Single-user app — tasks are global."""
     db = get_db()
-
-    # Dedup guard: if a near-identical reminder for essentially the same time already
-    # exists, don't create a second (the classic double-fire when the brain hedges). We
-    # require BOTH near-identical text AND a fire time within 5 minutes, so a deliberate
-    # "remind me at 9 and again at 5" still creates two.
-    existing = await db.reminders.find(
-        {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
-    ).to_list(None)
-    for r in existing:
-        rf = r["fire_at"]
-        if rf.tzinfo is None:
-            rf = rf.replace(tzinfo=timezone.utc)
-        if _sim(text, r["text"]) >= 0.85 and abs((rf - fire_utc).total_seconds()) <= 300:
-            when = fire_local.strftime("%a %d %b, %H:%M")
-            return f"You've already got a reminder to {text} around {when} — not adding a duplicate."
-
-    result = await db.reminders.insert_one(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "fire_at": fire_utc,
-            "status": "pending",
-            "created_at": now_utc,
-        }
-    )
-    schedule_reminder(str(result.inserted_id), chat_id, text, fire_utc)
-    await _log_event(chat_id, "set_reminder", "reminders", result.inserted_id, None)
-
-    when = fire_local.strftime("%a %d %b, %H:%M")
-    return f"Got it — I'll remind you to {text} at {when}."
-
-
+    filt: dict = {"remind_at": {"$ne": None}}
+    if open_only:
+        filt["status"] = "open"
+    rows = await db.tasks.find(filt).to_list(None)
+    rows.sort(key=lambda t: t["remind_at"])
+    return rows
 
 
 async def _list_reminders(chat_id: int, args: dict) -> str:
     db = get_db()
-    tz = ZoneInfo(TIMEZONE)
-    rows = (
-        await db.reminders.find(
-            {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
-        )
-        .sort("fire_at", 1)
-        .to_list(None)
-    )
+    rows = await _timed_tasks()
     recurring = await db.recurring_reminders.find(
         {"chat_id": chat_id, "active": True}
     ).to_list(None)
@@ -789,13 +832,9 @@ async def _list_reminders(chat_id: int, args: dict) -> str:
     lines: list[str] = []
     if rows:
         lines.append("Reminders:")
-        for r in rows:
-            fire_at = r["fire_at"]
-            if fire_at.tzinfo is None:
-                fire_at = fire_at.replace(tzinfo=timezone.utc)
-            local = fire_at.astimezone(tz)
-            tag = " — awaiting your confirmation" if r.get("status") == "awaiting_ack" else ""
-            lines.append(f"  • {r['text']} — {local.strftime('%a %d %b, %H:%M')}{tag}")
+        for t in rows:
+            tag = " — fired, awaiting your confirmation" if t.get("reminded_at") else ""
+            lines.append(f"  • {t['title']} — {_fmt_local(t['remind_at'])}{tag}")
     if recurring:
         lines.append("Recurring:")
         for r in recurring:
@@ -822,130 +861,64 @@ def _reminder_score(query: str, text: str) -> float:
     return max(ratio, overlap)
 
 
-def _select_reminders(query: str, rows: list[dict]) -> list[dict]:
-    """Reminders to act on: all that match strongly (handles duplicates/near-duplicates),
-    else the single best if it's a plausible match, else none."""
-    scored = [(r, _reminder_score(query, r["text"])) for r in rows]
-    strong = [r for r, s in scored if s >= 0.5]
-    if strong:
-        return strong
-    if scored:
-        best, bs = max(scored, key=lambda x: x[1])
-        if bs >= 0.34:
-            return [best]
-    return []
-
-
-async def _close_reminders(chat_id: int, query: str) -> str | None:
-    """Mark matching reminder(s) done. Acts on ALL strong matches, so a backlog of
-    near-duplicate nags clears in one go. Returns a message on success; returns None when
-    NO reminder matched, so callers can fall back to tasks (unified closing)."""
+async def _cancel_task(chat_id: int, args: dict) -> str:
+    """Drop something WITHOUT marking it done — a task (timed ping or not) or a recurring
+    reminder. Cancelled tasks keep their history (undoable, excluded from recaps)."""
     db = get_db()
-    rows = await db.reminders.find(
-        {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
-    ).to_list(None)
-    if not rows:
-        return None
+    query = args["query"]
 
-    selected = _select_reminders(query, rows)
-    if not selected:
-        return None
-
-    for r in selected:
-        prev_state = dict(r)
-        await db.reminders.update_one(
-            {"_id": r["_id"]},
-            {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc),
-                      "next_nudge_at": None}},
+    matches = await _fuzzy_tasks(query, status=None)
+    matches = [m for m in matches if m["status"] in ("open", "snoozed")]
+    if len(matches) > 1:
+        listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
+        return f'Found {len(matches)} tasks matching "{query}" — be more specific:\n{listed}'
+    if matches:
+        task = matches[0]
+        prev_state = dict(task)
+        await db.tasks.update_one(
+            {"_id": task["_id"]},
+            {"$set": {"status": "cancelled", "next_nudge_at": None,
+                      "updated_at": datetime.utcnow()}},
         )
-        await _log_event(chat_id, "complete_reminder", "reminders", r["_id"], prev_state)
-        try:
-            from agentzero.scheduler import get_scheduler
+        await _log_event(chat_id, "cancel_task", "tasks", task["_id"], prev_state)
+        _unschedule_ping(task["_id"])
+        # A cancelled task shouldn't linger in today's focus slate.
+        from agentzero import focus
 
-            get_scheduler().remove_job(f"reminder:{r['_id']}")
-        except Exception:
-            pass
+        await focus.remove_from_focus(chat_id, task["_id"])
+        return f'Cancelled "{task["title"]}".'
 
-    if len(selected) == 1:
-        return f'Nice — marked "{selected[0]["text"]}" done. I\'ll stop nagging.'
-    listed = "; ".join(r["text"] for r in selected)
-    return f"Marked {len(selected)} reminders done: {listed}. I'll stop nagging."
-
-
-async def _complete_reminder(chat_id: int, args: dict) -> str:
-    """Mark a reminder done once the user confirms (stops follow-ups). Unified closing: if
-    nothing matches a reminder, fall back to closing a matching TASK — so the user never
-    has to know which bucket the thing landed in."""
-    query = args["query"]
-    rem_msg = await _close_reminders(chat_id, query)
-    if rem_msg is not None:
-        return rem_msg
-    task_msg = await _close_task(chat_id, query)
-    if task_msg is not None:
-        return task_msg
-    return f'No active reminder or task matching "{query}".'
-
-
-async def _cancel_reminder(chat_id: int, args: dict) -> str:
-    db = get_db()
-    query = args["query"]
-    # Include awaiting_ack/fired — a reminder that has already FIRED (current or legacy
-    # lifecycle) and is lingering must be cancellable too, not just not-yet-fired ones.
-    one_offs = await db.reminders.find(
-        {"chat_id": chat_id, "status": {"$in": _ACTIVE_REMINDER_STATUSES}}
-    ).to_list(None)
+    # No task matched — maybe it's a recurring reminder ("stop the 8am standup ping").
     recurring = await db.recurring_reminders.find(
         {"chat_id": chat_id, "active": True}
     ).to_list(None)
-    if not one_offs and not recurring:
-        # Unified closing: nothing to cancel among reminders — maybe it's a task.
-        task_msg = await _close_task(chat_id, query)
-        if task_msg is not None:
-            return task_msg
-        return "No active reminders to cancel."
-
-    items = [("one_off", r) for r in one_offs] + [("recurring", r) for r in recurring]
-    scored = [(kind, r, _reminder_score(query, r["text"])) for kind, r in items]
-    strong = [(kind, r) for kind, r, s in scored if s >= 0.5]
+    scored = [(r, _reminder_score(query, r["text"])) for r in recurring]
+    strong = [r for r, s in scored if s >= 0.5]
+    if not strong and scored:
+        best, bs = max(scored, key=lambda x: x[1])
+        if bs >= 0.34:
+            strong = [best]
     if not strong:
-        bk, br, bs = max(scored, key=lambda x: x[2])
-        if bs < 0.34:
-            # Unified closing: no reminder matched — maybe they're cancelling a task.
-            task_msg = await _close_task(chat_id, query)
-            if task_msg is not None:
-                return task_msg
-            return f'No reminder matching "{query}".'
-        strong = [(bk, br)]
+        return f'Nothing active matching "{query}" to cancel.'
 
     cancelled: list[str] = []
-    for kind, r in strong:
-        if kind == "recurring":
-            await db.recurring_reminders.update_one(
-                {"_id": r["_id"]}, {"$set": {"active": False}}
-            )
-            job_id = f"recurring:{r['_id']}"
-        else:
-            prev_state = dict(r)
-            await db.reminders.update_one(
-                {"_id": r["_id"]}, {"$set": {"status": "cancelled", "next_nudge_at": None}}
-            )
-            await _log_event(chat_id, "cancel_reminder", "reminders", r["_id"], prev_state)
-            job_id = f"reminder:{r['_id']}"
+    for r in strong:
+        await db.recurring_reminders.update_one({"_id": r["_id"]}, {"$set": {"active": False}})
         try:
             from agentzero.scheduler import get_scheduler
 
-            get_scheduler().remove_job(job_id)
+            get_scheduler().remove_job(f"recurring:{r['_id']}")
         except Exception:
             pass
         cancelled.append(r["text"])
-
     if len(cancelled) == 1:
-        return f'Cancelled: "{cancelled[0]}".'
-    return f"Cancelled {len(cancelled)} reminders: {'; '.join(cancelled)}."
+        return f'Cancelled the recurring reminder: "{cancelled[0]}".'
+    return f"Cancelled {len(cancelled)} recurring reminders: {'; '.join(cancelled)}."
 
 
 async def _snooze_reminder(chat_id: int, args: dict) -> str:
-    """Push a reminder's next ping further out ('remind me later')."""
+    """Push a timed task's next ping further out ('remind me later'). Works on a fired
+    ping (delays the follow-up nag) or a pending one (moves when it first fires)."""
     from agentzero.scheduler import schedule_reminder
 
     db = get_db()
@@ -954,38 +927,40 @@ async def _snooze_reminder(chat_id: int, args: dict) -> str:
         minutes = 60
     query = (args.get("query") or "").strip()
 
-    rows = await db.reminders.find(
-        {"chat_id": chat_id, "status": {"$in": ["pending", "awaiting_ack"]}}
-    ).to_list(None)
+    rows = await _timed_tasks()
     if not rows:
         return "No active reminders to push back."
 
     if query:
-        best = max(rows, key=lambda r: _sim(query, r["text"]))
-        if _sim(query, best["text"]) < 0.3:
+        best = max(rows, key=lambda t: _reminder_score(query, t["title"]))
+        if _reminder_score(query, best["title"]) < 0.3:
             return f'No active reminder matching "{query}".'
         targets = [best]
     else:
         targets = rows  # push everything outstanding
 
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     new_at = now + timedelta(minutes=minutes)
-    for r in targets:
-        if r.get("status") == "awaiting_ack":
-            # Delay the next follow-up nudge.
-            await db.reminders.update_one(
-                {"_id": r["_id"]}, {"$set": {"next_nudge_at": new_at}}
-            )
+    for t in targets:
+        if t.get("reminded_at"):
+            # Already fired — delay the next follow-up nudge.
+            await db.tasks.update_one({"_id": t["_id"]}, {"$set": {"next_nudge_at": new_at}})
         else:
-            # Still pending — move when it first fires and reschedule the job.
-            await db.reminders.update_one(
-                {"_id": r["_id"]}, {"$set": {"fire_at": new_at}}
+            # Still pending — move when it first fires and reschedule the job. If the push
+            # crosses into a later day, drag the due date along so it doesn't read overdue.
+            updates: dict[str, Any] = {"remind_at": new_at}
+            due = t.get("due_date")
+            new_local = new_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(TIMEZONE))
+            if due is not None and new_local.date() > due.date():
+                updates["due_date"] = datetime(new_local.year, new_local.month, new_local.day)
+            await db.tasks.update_one({"_id": t["_id"]}, {"$set": updates})
+            schedule_reminder(
+                str(t["_id"]), chat_id, t["title"], new_at.replace(tzinfo=timezone.utc)
             )
-            schedule_reminder(str(r["_id"]), chat_id, r["text"], new_at)
 
     pretty = f"{minutes} min" if minutes < 120 else f"{round(minutes / 60, 1)} h"
     if len(targets) == 1:
-        return f'Pushed "{targets[0]["text"]}" back by {pretty}.'
+        return f'Pushed "{targets[0]["title"]}" back by {pretty}.'
     return f"Pushed all {len(targets)} reminders back by {pretty}."
 
 
@@ -1069,24 +1044,14 @@ def _oid(s: str) -> ObjectId | None:
 
 
 async def complete_reminder_by_id(chat_id: int, rid: str) -> str:
+    """Old inline 'Done' buttons on reminder messages. Migrated reminders kept their
+    ObjectId, so the id now resolves in the tasks collection."""
     db = get_db()
     oid = _oid(rid)
-    r = await db.reminders.find_one({"_id": oid, "chat_id": chat_id}) if oid else None
-    if not r or r.get("status") in ("done", "cancelled"):
+    t = await db.tasks.find_one({"_id": oid}) if oid else None
+    if not t or t.get("status") in ("done", "cancelled"):
         return "Already handled."
-    prev = dict(r)
-    await db.reminders.update_one(
-        {"_id": oid},
-        {"$set": {"status": "done", "completed_at": datetime.now(timezone.utc), "next_nudge_at": None}},
-    )
-    await _log_event(chat_id, "complete_reminder", "reminders", oid, prev)
-    try:
-        from agentzero.scheduler import get_scheduler
-
-        get_scheduler().remove_job(f"reminder:{rid}")
-    except Exception:
-        pass
-    return f'✅ Done: "{r["text"]}".'
+    return f'✅ {await _do_close_task(chat_id, t)}'
 
 
 async def snooze_reminder_by_id(chat_id: int, rid: str, minutes: int) -> str:
@@ -1094,18 +1059,17 @@ async def snooze_reminder_by_id(chat_id: int, rid: str, minutes: int) -> str:
 
     db = get_db()
     oid = _oid(rid)
-    r = await db.reminders.find_one({"_id": oid, "chat_id": chat_id}) if oid else None
-    if not r or r.get("status") in ("done", "cancelled"):
+    t = await db.tasks.find_one({"_id": oid}) if oid else None
+    if not t or t.get("status") in ("done", "cancelled") or not t.get("remind_at"):
         return "That reminder's no longer active."
-    now = datetime.now(timezone.utc)
-    new_at = now + timedelta(minutes=minutes)
-    if r.get("status") == "awaiting_ack":
-        await db.reminders.update_one({"_id": oid}, {"$set": {"next_nudge_at": new_at}})
+    new_at = datetime.utcnow() + timedelta(minutes=minutes)
+    if t.get("reminded_at"):
+        await db.tasks.update_one({"_id": oid}, {"$set": {"next_nudge_at": new_at}})
     else:
-        await db.reminders.update_one({"_id": oid}, {"$set": {"fire_at": new_at}})
-        schedule_reminder(rid, chat_id, r["text"], new_at)
+        await db.tasks.update_one({"_id": oid}, {"$set": {"remind_at": new_at}})
+        schedule_reminder(rid, chat_id, t["title"], new_at.replace(tzinfo=timezone.utc))
     pretty = f"{minutes} min" if minutes < 120 else f"{round(minutes / 60, 1)} h"
-    return f'⏰ Snoozed "{r["text"]}" for {pretty}.'
+    return f'⏰ Snoozed "{t["title"]}" for {pretty}.'
 
 
 async def mark_done_by_id(chat_id: int, tid: str) -> str:

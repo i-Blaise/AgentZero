@@ -99,6 +99,10 @@ async def gather_candidates(chat_id: int) -> dict:
 
     overdue, due_soon, stalled = [], [], []
     for t in await db.tasks.find({"status": "open"}).to_list(None):
+        if t.get("remind_at") is not None:
+            # Timed task: its ping fires at the exact time the user asked for, and the
+            # follow-up loop nags after that. The opportunistic heartbeat stays out of it.
+            continue
         last_nudged = _aware(t.get("last_nudged_at"))
         if last_nudged and last_nudged > renudge_cutoff:
             continue  # already nudged recently

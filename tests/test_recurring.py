@@ -51,7 +51,7 @@ async def test_cancel_recurring(mock_db):
     with patch("agentzero.scheduler.schedule_recurring_reminder"):
         await execute_tool(CHAT_ID, _tc("set_recurring_reminder", text="weekly review", hour=17, day_of_week="fri"))
     with patch("agentzero.scheduler.get_scheduler"):
-        result = await execute_tool(CHAT_ID, _tc("cancel_reminder", query="weekly review"))
+        result = await execute_tool(CHAT_ID, _tc("cancel_task", query="weekly review"))
     assert "cancelled" in result.lower()
     doc = await mock_db.recurring_reminders.find_one({"text": "weekly review"})
     assert doc["active"] is False

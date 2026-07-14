@@ -73,11 +73,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_indexes()
+    # Legacy reminders → tasks (2026-07-14 merge). Idempotent; must run before the
+    # scheduler loads pending pings so migrated ones get their jobs registered.
+    from agentzero.migrations import migrate_reminders_to_tasks
+
+    await migrate_reminders_to_tasks()
     bot = get_bot()
 
-    # Reminders + autonomy heartbeat
+    # Timed pings + autonomy heartbeat
     start_scheduler()
-    await load_pending_reminders()
+    await load_pending_reminders(ALLOWED_CHAT_ID)
     await load_recurring_reminders()
     schedule_reminder_followups(ALLOWED_CHAT_ID)
     if AUTONOMY_ENABLED:

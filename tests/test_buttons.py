@@ -43,10 +43,12 @@ def test_no_markup_when_empty():
 
 @pytest.mark.asyncio
 async def test_done_button_completes_reminder(mock_db):
-    rid = (await mock_db.reminders.insert_one(
-        {"chat_id": CHAT_ID, "text": "call the bank", "fire_at": datetime.now(timezone.utc),
-         "status": "awaiting_ack", "created_at": datetime.now(timezone.utc),
-         "next_nudge_at": datetime.now(timezone.utc)}
+    """Old rem:done buttons resolve against tasks now (migrated reminders keep their id)."""
+    now = datetime.utcnow()
+    rid = (await mock_db.tasks.insert_one(
+        {"project_id": None, "parent_task_id": None, "title": "call the bank",
+         "status": "open", "due_date": None, "remind_at": now, "reminded_at": now,
+         "next_nudge_at": now, "created_at": now, "updated_at": now}
     )).inserted_id
 
     bot = _fake_bot()
@@ -55,18 +57,20 @@ async def test_done_button_completes_reminder(mock_db):
          patch("agentzero.scheduler.get_scheduler"):
         await main._handle_callback(_cq(f"rem:done:{rid}"))
 
-    doc = await mock_db.reminders.find_one({"_id": rid})
+    doc = await mock_db.tasks.find_one({"_id": rid})
     assert doc["status"] == "done"
+    assert doc["next_nudge_at"] is None
     bot.answer_callback_query.assert_awaited_once()
     bot.edit_message_text.assert_awaited_once()  # keyboard stripped + annotated
 
 
 @pytest.mark.asyncio
 async def test_snooze_button_pushes_next_nudge(mock_db):
-    now = datetime.now(timezone.utc)
-    rid = (await mock_db.reminders.insert_one(
-        {"chat_id": CHAT_ID, "text": "stretch", "fire_at": now, "status": "awaiting_ack",
-         "created_at": now, "next_nudge_at": now}
+    now = datetime.utcnow()
+    rid = (await mock_db.tasks.insert_one(
+        {"project_id": None, "parent_task_id": None, "title": "stretch",
+         "status": "open", "due_date": None, "remind_at": now, "reminded_at": now,
+         "next_nudge_at": now, "created_at": now, "updated_at": now}
     )).inserted_id
 
     bot = _fake_bot()
@@ -74,9 +78,9 @@ async def test_snooze_button_pushes_next_nudge(mock_db):
          patch("agentzero.main.get_bot", return_value=bot):
         await main._handle_callback(_cq(f"rem:snz:{rid}:60"))
 
-    doc = await mock_db.reminders.find_one({"_id": rid})
-    assert _utc(doc["next_nudge_at"]) > now + timedelta(minutes=50)
-    assert doc["status"] == "awaiting_ack"  # snoozed, not completed
+    doc = await mock_db.tasks.find_one({"_id": rid})
+    assert doc["next_nudge_at"].replace(tzinfo=None) > now + timedelta(minutes=50)
+    assert doc["status"] == "open"  # snoozed, not completed
 
 
 @pytest.mark.asyncio

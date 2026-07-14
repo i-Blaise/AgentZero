@@ -19,6 +19,7 @@ def _app():
 
 async def _seed(mock_db):
     now = datetime.now(timezone.utc)
+    naive = now.replace(tzinfo=None)
     work = (await mock_db.projects.insert_one(
         {"name": "Jobotron", "scope": "work", "created_at": now, "updated_at": now}
     )).inserted_id
@@ -30,12 +31,16 @@ async def _seed(mock_db):
         {"project_id": work, "title": "later thing", "status": "snoozed",
          "snoozed_until": now + timedelta(days=5), "created_at": now, "updated_at": now},
     ])
-    await mock_db.reminders.insert_many([
-        {"chat_id": CHAT_ID, "text": "call the bank", "status": "awaiting_ack",
-         "fire_at": now, "created_at": now, "fired_at": now, "nudge_count": 2},
-        {"chat_id": CHAT_ID, "text": "stretch", "status": "pending", "fire_at": now + timedelta(hours=1), "created_at": now},
-        {"chat_id": CHAT_ID, "text": "old one", "status": "done", "fire_at": now - timedelta(days=1),
-         "created_at": now, "completed_at": now},
+    # Timed pings — tasks with remind_at (the merged "reminders"), naive-UTC datetimes.
+    await mock_db.tasks.insert_many([
+        {"project_id": None, "title": "call the bank", "status": "open",
+         "remind_at": naive, "reminded_at": naive, "next_nudge_at": naive,
+         "nudge_count": 2, "created_at": naive, "updated_at": naive},          # → awaiting_ack
+        {"project_id": None, "title": "stretch", "status": "open",
+         "remind_at": naive + timedelta(hours=1), "created_at": naive, "updated_at": naive},  # → pending
+        {"project_id": None, "title": "old one", "status": "done",
+         "remind_at": naive - timedelta(days=1), "completed_at": naive,
+         "created_at": naive, "updated_at": naive},                            # → done
     ])
     await mock_db.recurring_reminders.insert_one(
         {"chat_id": CHAT_ID, "text": "standup", "hour": 9, "minute": 0, "day_of_week": "mon-fri", "active": True}
@@ -53,11 +58,15 @@ async def test_tasks_endpoint(mock_db):
     with p1, p2:
         r = TestClient(_app()).get("/api/tasks", headers={"X-API-Key": KEY})
     body = r.json()
-    assert body["count"] == 3
-    assert body["by_status"] == {"open": 1, "done": 1, "snoozed": 1}
+    # Timed pings are tasks too since the merge — they show on the board.
+    assert body["count"] == 6
+    assert body["by_status"] == {"open": 3, "done": 2, "snoozed": 1}
     demo = next(t for t in body["tasks"] if t["title"] == "ship demo")
     assert demo["project"] == "Jobotron" and demo["scope"] == "work"
     assert demo["is_overdue"] is True
+    assert demo["remind_at"] is None
+    bank = next(t for t in body["tasks"] if t["title"] == "call the bank")
+    assert bank["remind_at"] is not None and bank["reminded_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -67,7 +76,8 @@ async def test_tasks_status_filter(mock_db):
     with p1, p2:
         r = TestClient(_app()).get("/api/tasks?status=open", headers={"X-API-Key": KEY})
     body = r.json()
-    assert body["count"] == 1 and body["tasks"][0]["title"] == "ship demo"
+    assert body["count"] == 3
+    assert {t["title"] for t in body["tasks"]} == {"ship demo", "call the bank", "stretch"}
 
 
 @pytest.mark.asyncio
@@ -77,10 +87,12 @@ async def test_reminders_endpoint(mock_db):
     with p1, p2:
         r = TestClient(_app()).get("/api/reminders", headers={"X-API-Key": KEY})
     body = r.json()
+    # Same pre-merge response shape, now derived from timed tasks.
     assert body["count"] == 3
     assert body["by_status"] == {"awaiting_ack": 1, "pending": 1, "done": 1}
     awaiting = next(x for x in body["reminders"] if x["text"] == "call the bank")
     assert awaiting["awaiting_ack"] is True and awaiting["nudge_count"] == 2
+    assert awaiting["fire_at"] is not None and awaiting["fired_at"] is not None
     assert body["recurring"][0]["schedule"] == "every weekday at 09:00"
 
 
@@ -91,8 +103,9 @@ async def test_overview_endpoint(mock_db):
     with p1, p2:
         r = TestClient(_app()).get("/api/overview", headers={"X-API-Key": KEY})
     body = r.json()
-    assert body["tasks"] == {"open": 1, "done": 1, "snoozed": 1}
+    assert body["tasks"] == {"open": 3, "done": 2, "snoozed": 1}
     assert body["reminders"] == {"awaiting_ack": 1, "pending": 1, "done": 1}
+    assert body["reminders_active"] == 2
     assert body["projects"] == 1
 
 
@@ -108,7 +121,7 @@ def test_board_requires_key(mock_db):
 # ---------------------------------------------------------------------------
 
 async def _seed_hierarchy(mock_db):
-    """A goal with 2 steps (1 done) + a standalone task, plus a legacy 'fired' reminder."""
+    """A goal with 2 steps (1 done) + a standalone task."""
     now = datetime.now(timezone.utc)
     work = (await mock_db.projects.insert_one(
         {"name": "Jobotron", "scope": "work", "created_at": now, "updated_at": now}
@@ -124,15 +137,6 @@ async def _seed_hierarchy(mock_db):
          "status": "open", "created_at": now, "updated_at": now},
         {"project_id": work, "parent_task_id": None, "title": "standalone thing",
          "status": "open", "created_at": now, "updated_at": now},
-    ])
-    await mock_db.reminders.insert_many([
-        {"chat_id": CHAT_ID, "text": "legacy ghost", "status": "fired",
-         "fire_at": now, "fired_at": now, "created_at": now,
-         "next_nudge_at": now + timedelta(hours=3)},
-        {"chat_id": CHAT_ID, "text": "fresh ping", "status": "pending",
-         "fire_at": now + timedelta(hours=1), "created_at": now},
-        {"chat_id": CHAT_ID, "text": "closed", "status": "done",
-         "fire_at": now - timedelta(days=1), "created_at": now, "completed_at": now},
     ])
     return goal
 
@@ -185,24 +189,40 @@ async def test_tasks_status_filter_keeps_tree_progress_truthful(mock_db):
 
 @pytest.mark.asyncio
 async def test_reminders_mirror_lifecycle(mock_db):
-    await _seed_hierarchy(mock_db)
+    """The /api/reminders view derives the old lifecycle vocabulary from timed tasks:
+    open+reminded_at → awaiting_ack, open → pending, done/cancelled pass through."""
+    now = datetime.utcnow()
+    await mock_db.tasks.insert_many([
+        {"project_id": None, "title": "fired ghost", "status": "open",
+         "remind_at": now, "reminded_at": now, "next_nudge_at": now + timedelta(hours=3),
+         "created_at": now, "updated_at": now},
+        {"project_id": None, "title": "fresh ping", "status": "open",
+         "remind_at": now + timedelta(hours=1), "created_at": now, "updated_at": now},
+        {"project_id": None, "title": "closed", "status": "done",
+         "remind_at": now - timedelta(days=1), "completed_at": now,
+         "created_at": now, "updated_at": now},
+        {"project_id": None, "title": "dropped", "status": "cancelled",
+         "remind_at": now - timedelta(days=1), "created_at": now, "updated_at": now},
+    ])
     p1, p2 = _patches()
     with p1, p2:
         client = TestClient(_app())
         body = client.get("/api/reminders", headers={"X-API-Key": KEY}).json()
         active = client.get("/api/reminders?status=active", headers={"X-API-Key": KEY}).json()
 
-    ghost = next(x for x in body["reminders"] if x["text"] == "legacy ghost")
-    # Legacy 'fired' = fired-but-unconfirmed: awaiting the user's word, still active.
-    assert ghost["status"] == "fired"
+    ghost = next(x for x in body["reminders"] if x["text"] == "fired ghost")
+    assert ghost["status"] == "awaiting_ack"
     assert ghost["awaiting_ack"] is True
     assert ghost["is_active"] is True
     assert ghost["next_nudge_at"] is not None
     closed = next(x for x in body["reminders"] if x["text"] == "closed")
+    assert closed["status"] == "done"
     assert closed["awaiting_ack"] is False and closed["is_active"] is False
+    dropped = next(x for x in body["reminders"] if x["text"] == "dropped")
+    assert dropped["status"] == "cancelled" and dropped["is_active"] is False
 
-    # status=active pseudo-filter matches the executor's definition (incl. legacy fired).
-    assert {x["text"] for x in active["reminders"]} == {"legacy ghost", "fresh ping"}
+    # status=active pseudo-filter = still-open timed tasks.
+    assert {x["text"] for x in active["reminders"]} == {"fired ghost", "fresh ping"}
 
 
 @pytest.mark.asyncio
@@ -212,7 +232,7 @@ async def test_overview_goals_rollup(mock_db):
     with p1, p2:
         body = TestClient(_app()).get("/api/overview", headers={"X-API-Key": KEY}).json()
     assert body["goals"] == {"count": 1, "steps_done": 1, "steps_total": 2}
-    assert body["reminders_active"] == 2  # legacy fired + pending
+    assert body["reminders_active"] == 0  # no timed tasks in this seed
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +254,7 @@ async def test_overview_focus_null_before_selection(mock_db):
 async def test_overview_focus_block(mock_db):
     from agentzero import focus as focus_mod
 
-    goal_id = await _seed_hierarchy(mock_db)
+    await _seed_hierarchy(mock_db)
     step = await mock_db.tasks.find_one({"title": "prep ENV vars"})
     done_step = await mock_db.tasks.find_one({"title": "pull latest"})
     standalone = await mock_db.tasks.find_one({"title": "standalone thing"})

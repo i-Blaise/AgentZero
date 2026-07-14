@@ -65,11 +65,16 @@ def _rank_key(t: dict):
 
 async def _open_actionables() -> list[dict]:
     """Open tasks that are actionable focus units. A GOAL with open steps is represented
-    by its steps (the actual next actions), never listed alongside them."""
+    by its steps (the actual next actions), never listed alongside them. Timed tasks
+    (remind_at set) are excluded — their ping fires at the exact time the user asked for,
+    so they don't need a slate seat (the user can still swap one in explicitly)."""
     db = get_db()
     open_tasks = await db.tasks.find({"status": "open"}).to_list(None)
     goals_with_open_steps = {t["parent_task_id"] for t in open_tasks if t.get("parent_task_id")}
-    return [t for t in open_tasks if t["_id"] not in goals_with_open_steps]
+    return [
+        t for t in open_tasks
+        if t["_id"] not in goals_with_open_steps and t.get("remind_at") is None
+    ]
 
 
 async def _label_maps() -> tuple[dict, dict]:

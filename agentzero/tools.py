@@ -24,22 +24,43 @@ TOOLS: list[dict] = [
     {
         "name": "add_task",
         "description": (
-            "Add a task to an existing project. To file it as a STEP under an existing goal "
-            "(e.g. 'prep the ENV vars' under 'Deploy the website'), pass parent_task_query — "
-            "only when the user clearly ties it to that goal, or after you've asked and they "
-            "confirmed which goal it belongs under. Otherwise leave it out and it's standalone."
+            "Add a task — the ONE way to track anything to do, including reminders. "
+            "'Remind me at 4 to call the landlord' is a task with remind_at set: it pings "
+            "the user at that exact time and nags until they confirm it's done. Omit "
+            "project_name and it files into the Inbox project (right for quick reminders — "
+            "never make the user invent a project for one). To file it as a STEP under an "
+            "existing goal (e.g. 'prep the ENV vars' under 'Deploy the website'), pass "
+            "parent_task_query — only when the user clearly ties it to that goal, or after "
+            "you've asked and they confirmed. Otherwise it's standalone."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "project_name": {
                     "type": "string",
-                    "description": "Name of the project (fuzzy matched)",
+                    "description": (
+                        "Name of the project (fuzzy matched). Omit for a project-less "
+                        "item like a simple timed reminder — it goes to the Inbox."
+                    ),
                 },
                 "title": {"type": "string", "description": "Task title"},
                 "due_date": {
                     "type": "string",
-                    "description": "Optional due date in YYYY-MM-DD format",
+                    "description": (
+                        "Optional due date in YYYY-MM-DD format. When remind_at is set "
+                        "this defaults to that day automatically."
+                    ),
+                },
+                "remind_at": {
+                    "type": "string",
+                    "description": (
+                        "Optional timed ping: absolute local time in ISO 8601 "
+                        "(YYYY-MM-DDTHH:MM:SS). Set it whenever the user names a time "
+                        "('at 3pm', 'in 20 minutes', 'tomorrow morning') — compute it from "
+                        "the current local time in the system prompt (14:30 + 'in two "
+                        "minutes' → 14:32). The bot pings at that moment and follows up "
+                        "until the task is marked done."
+                    ),
                 },
                 "parent_task_query": {
                     "type": "string",
@@ -50,7 +71,7 @@ TOOLS: list[dict] = [
                     ),
                 },
             },
-            "required": ["project_name", "title"],
+            "required": ["title"],
         },
     },
     {
@@ -80,7 +101,11 @@ TOOLS: list[dict] = [
     },
     {
         "name": "mark_done",
-        "description": "Mark an open task as completed.",
+        "description": (
+            "Mark an open task as completed — including timed reminders (they're tasks). "
+            "Use when the user confirms something is handled ('done', 'sorted', 'I called "
+            "them'): it closes the task and stops any ping follow-ups."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -136,7 +161,7 @@ TOOLS: list[dict] = [
             "conversations — preferences, personal details, important dates, people, "
             "ongoing context, habits. Call this PROACTIVELY whenever the user shares "
             "something lasting, even if they never say 'remember this'. Do not store "
-            "transient or task-like items (use add_task / set_reminder for those)."
+            "transient or task-like items (use add_task for those)."
         ),
         "parameters": {
             "type": "object",
@@ -168,40 +193,13 @@ TOOLS: list[dict] = [
         },
     },
     {
-        "name": "set_reminder",
-        "description": (
-            "Set a one-off reminder that pings the user at a specific time. "
-            "Use for any 'remind me to X in N minutes/hours', 'remind me at 3pm', "
-            "or 'remind me tomorrow morning to X'. This is standalone — it does NOT "
-            "need a project. Always resolve the time to an absolute timestamp using "
-            "the current local time given in the system prompt."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "What to remind the user about, phrased as the reminder",
-                },
-                "fire_at": {
-                    "type": "string",
-                    "description": (
-                        "Absolute local time in ISO 8601 (YYYY-MM-DDTHH:MM:SS). "
-                        "Compute this from the current local time in the system prompt — "
-                        "e.g. if it's 14:30 and the user says 'in two minutes', use 14:32."
-                    ),
-                },
-            },
-            "required": ["text", "fire_at"],
-        },
-    },
-    {
         "name": "set_recurring_reminder",
         "description": (
             "Set a REPEATING reminder that fires on a schedule — for 'every weekday at 8', "
-            "'remind me every Monday to send invoices', 'daily at 9pm'. Unlike set_reminder "
-            "(a single ping that nags until confirmed), a recurring reminder just pings each "
-            "time it comes round. Resolve the time of day to a 24h hour/minute in local time."
+            "'remind me every Monday to send invoices', 'daily at 9pm'. Unlike a one-off "
+            "timed task (add_task with remind_at, which nags until confirmed), a recurring "
+            "reminder just pings each time it comes round. Resolve the time of day to a 24h "
+            "hour/minute in local time."
         ),
         "parameters": {
             "type": "object",
@@ -223,37 +221,26 @@ TOOLS: list[dict] = [
     },
     {
         "name": "list_reminders",
-        "description": "List the user's upcoming one-off and recurring reminders.",
+        "description": (
+            "List what's SCHEDULED to ping the user: upcoming timed tasks (with their ping "
+            "times, flagging any that fired and await confirmation) and recurring reminders."
+        ),
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "name": "cancel_reminder",
-        "description": "Cancel a pending reminder the user no longer wants (it won't fire). Different from completing one.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Keyword or phrase to find the reminder (fuzzy matched)",
-                }
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "complete_reminder",
+        "name": "cancel_task",
         "description": (
-            "Mark a reminder as DONE when the user confirms they've handled it "
-            "(e.g. 'done', 'sorted that', 'I called the bank'). This stops the "
-            "follow-up nudges. Use this — not cancel_reminder — when the thing was "
-            "actually completed."
+            "Cancel/drop something the user no longer wants — a task, a timed reminder "
+            "(its ping won't fire), or a recurring reminder — WITHOUT marking it done. "
+            "Use for 'cancel that', 'drop it', 'never mind', 'stop reminding me about X "
+            "(I'm not doing it)'. If the thing was actually completed, use mark_done instead."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keyword or phrase identifying which reminder was completed (fuzzy matched)",
+                    "description": "Keyword or phrase to find the task or reminder (fuzzy matched)",
                 }
             },
             "required": ["query"],
@@ -301,11 +288,12 @@ TOOLS: list[dict] = [
     {
         "name": "snooze_reminder",
         "description": (
-            "Push a reminder's next ping further out — for 'remind me later', 'not now', "
-            "'give me an hour', 'ping me about that this evening'. Works on a fired reminder "
+            "Push a timed task's next ping further out — for 'remind me later', 'not now', "
+            "'give me an hour', 'ping me about that this evening'. Works on a fired ping "
             "that's awaiting confirmation (delays the next nudge) or a still-pending one "
             "(moves when it first fires). Defaults to 60 minutes if no time is given. Omit "
-            "'query' to push ALL outstanding reminders."
+            "'query' to push ALL outstanding pings. (For hiding a plain task until a DATE, "
+            "use snooze instead.)"
         ),
         "parameters": {
             "type": "object",
@@ -598,7 +586,7 @@ TOOLS: list[dict] = [
         "name": "get_recap",
         "description": (
             "Brief the user on everything they COMPLETED over a recent period — tasks marked "
-            "done (with project and goal context) and reminders confirmed done, each with the "
+            "done (with project and goal context, timed reminders included), each with the "
             "day it was finished. Use for 'what have I completed this week', 'brief me on the "
             "last two days', 'what did I get done', 'weekly review'. Convert the period the "
             "user names into days (default 7). This looks BACKWARD at finished work; for "

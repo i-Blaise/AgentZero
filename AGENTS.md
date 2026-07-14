@@ -158,12 +158,13 @@ tree[]}`) — the flat `tasks[]` respects the status filter and each row carries
 (`parent_task_id`/`parent_title` for steps; `is_goal` + `steps_done`/`steps_total` for goals, via
 `hierarchy_maps()` over ALL tasks so counts stay truthful under filtering); `tree[]` is the nested
 goal→steps view (`task_tree_view`, scope-filtered but ALL statuses so progress is honest — status
-filtering is the flat list's job). `/api/reminders` (`status` filter, plus pseudo-status
-`status=active` = the executor's `ACTIVE_REMINDER_STATUSES` from models.py: pending/awaiting_ack/legacy
-fired → `{count, by_status, reminders[], recurring[]}`; each reminder has `awaiting_ack` (true for BOTH
-awaiting_ack and legacy fired — same "waiting on the user's word" state), `is_active`, and
-`next_nudge_at`). `/api/overview` (`{tasks, reminders, reminders_active, goals:{count, steps_done,
-steps_total}, projects}` rollup). `period` is today|week|month|all; explicit
+filtering is the flat list's job; task rows also carry `remind_at`/`reminded_at` since the merge).
+`/api/reminders` is a **compatibility view over timed tasks** (2026-07-14 merge — there is no
+reminders collection read anymore): same `{count, by_status, reminders[], recurring[]}` shape,
+statuses DERIVED back to the old vocabulary (`open`+`reminded_at` → `awaiting_ack`, plain `open` →
+`pending`, `done`/`cancelled` pass through), `status=active` pseudo-filter = still-open timed
+tasks. `/api/overview` (`{tasks, reminders, reminders_active, goals:{count, steps_done,
+steps_total}, focus, projects}` rollup). `period` is today|week|month|all; explicit
 `start`/`end` ISO dates override it. Amounts are grouped per currency (never summed across).
 
 ## Yahoo Mail — read-only (IMAP)
@@ -230,7 +231,8 @@ adapter translates them and manages its own native multi-turn message format ins
 | `executor.py` | Deterministic tool execution, fuzzy matching, events log, `undo_last` |
 | `task_tree.py` | Pure helpers for the goal→step task tree (`build_forest`, `active_forest_lines`, progress) — one source of truth for tree rendering across snapshot/status/digest/board |
 | `prompts.py` | `build_system_prompt()` (injects date/time, store snapshot, reminders, memory) + `PERSONALITY` constant |
-| `scheduler.py` | APScheduler: one-off reminders, heartbeat interval, morning-digest cron |
+| `scheduler.py` | APScheduler: timed-task pings + follow-up nags, heartbeat interval, digest crons |
+| `migrations.py` | Idempotent startup migrations — 2026-07-14 reminders→tasks copy (keeps ObjectIds; legacy collection left as backup) |
 | `autonomy.py` | Proactive heartbeat — ranks open tasks by urgency, fenced to today's focus slate, LLM picks ONE to nudge (or SILENT); suppresses only that task; spontaneous jittered spacing |
 | `focus.py` | Daily focus — commits the day's 3-4 task slate (carryovers first, LLM-judged fill), fences heartbeat nudges to it, discloses deadline overflow |
 | `digest.py` | Morning digest — daily rundown, always sends |
@@ -249,8 +251,11 @@ adapter translates them and manages its own native multi-turn message format ins
 | `collectors/` | Phase-4 stubs (external task collectors) — interface only |
 
 ### Data model (MongoDB collections)
-`projects`, `tasks` (optional `parent_task_id` → goal/step tree), `events` (undo log), `chat_history` (last ~10 msgs/chat),
-`reminders`, `recurring_reminders` (cron-style repeating pings), `daily_focus` (one doc per
+`projects`, `tasks` (optional `parent_task_id` → goal/step tree; optional `remind_at` +
+`reminded_at`/`next_nudge_at`/`nudge_count` = a timed ping — "reminders" merged into tasks
+2026-07-14; statuses open/done/snoozed/cancelled), `events` (undo log), `chat_history` (last ~10 msgs/chat),
+`reminders` (LEGACY — migrated into tasks at startup by `migrations.py`, kept only as a backup,
+nothing reads it), `recurring_reminders` (cron-style repeating pings), `daily_focus` (one doc per
 local day — today's committed 3-4 task slate; see focus.py), `memory` (freeform facts),
 `system_state` (last/next proactive-nudge time, nudge cadence, `last_app_scan_uid`),
 `seen_jobs`, `applications` (tracked job applications), `expenses` (logged from receipts),
@@ -258,9 +263,10 @@ local day — today's committed 3-4 task slate; see focus.py), `memory` (freefor
 cursors (`receipt_cursor_<source>`) and the application scan cursor (`last_app_scan_uid`).
 
 ### Tools the LLM can call
-Local: `create_project`, `add_task`, `mark_done`, `set_task_parent`, `update_task`, `snooze`,
-`get_status`, `get_recap`, `set_daily_focus`, `set_reminder`, `set_recurring_reminder`, `list_reminders`, `cancel_reminder`,
-`complete_reminder`, `snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
+Local: `create_project`, `add_task` (optional `remind_at` = timed ping; optional `project_name`,
+defaults to the Inbox project), `mark_done`, `cancel_task`, `set_task_parent`, `update_task`, `snooze`,
+`get_status`, `get_recap`, `set_daily_focus`, `set_recurring_reminder`, `list_reminders`,
+`snooze_reminder`, `set_reminder_cadence`, `remember`, `forget`,
 `set_job_profile`, `find_jobs`, `web_search`, `web_fetch`, `list_applications`,
 `track_application`, `update_application`, `check_job_replies`, `list_expenses`,
 `expense_summary`, `add_expense`, `check_receipts`. When `YAHOO_MAIL_ENABLED`, also
@@ -283,33 +289,42 @@ into the system prompt by `build_system_prompt` as authoritative context. Daily 
 `/jobs` triggers on demand. Add more sources by adding a fetcher to `jobs.py`; paid
 search API (Tavily/Brave/SerpAPI) is the planned breadth upgrade.
 
-**Persistent reminders:** a fired reminder does NOT auto-complete — it goes to
-`status="awaiting_ack"` and a follow-up loop (`scheduler._reminder_followup_job`,
-quiet-hours-aware) keeps re-nudging until the user confirms. `complete_reminder`
-(called when the user says "done/sorted") marks it `done` and stops nudges. Reminder
-statuses: pending → awaiting_ack → done (or cancelled).
-- **Matching is keyword/token-based** (`_reminder_score`/`_select_reminders`): a partial phrase
-  ("gyacity images from brown") matches a long reminder via substring + word-overlap + fuzzy ratio,
-  and complete/cancel act on ALL strong matches (clears near-duplicate nags in one go). Whole-string
-  `_sim` alone used to silently miss these → the reminder never closed and nagged forever.
-- **`cancel_reminder` covers `awaiting_ack`**, not just `pending` — a reminder that has already fired
-  and is nagging can be removed by phrase, not only completed.
-- **Legacy `fired` status is closeable** (`_ACTIVE_REMINDER_STATUSES = pending/awaiting_ack/fired`):
-  an older lifecycle wrote `status="fired"` instead of `awaiting_ack`; those orphans were invisible
-  to complete/cancel/list (which filtered only pending+awaiting_ack), so the user could never close
-  them ("no reminder matching…"). complete_reminder, cancel_reminder, and list_reminders now include
-  `fired`. No current code writes `fired` (scheduler.py writes `awaiting_ack`); this only un-strands
-  the legacy cohort and defends against any stray. The follow-up loop still nags `awaiting_ack` only,
-  so re-including `fired` does NOT resurrect 2-week-old reminders to ping the user.
-- **Task vs reminder is mutually exclusive, decided up front** (prompt `Rules:`): a request with a
-  TIME → reminder only; no time but ongoing/trackable work → task only; genuinely ambiguous → the
-  model asks ONE question (timed ping vs task list) instead of hedging. The old "pick whichever fits"
-  wording let the brain create BOTH a reminder and a task for one request (the "two of the same" bug).
+**Timed pings — tasks and reminders are ONE entity (merged 2026-07-14):** a "reminder" is a
+task with `remind_at` set (naive UTC, like every task datetime). `add_task` with `remind_at`
+creates it (no `project_name` → the auto-created **Inbox** project; `due_date` defaults to the
+ping's local day so due/overdue/focus logic just works); `scheduler.schedule_reminder` registers
+the APScheduler job (id `reminder:<task_id>` — same format as pre-merge so jobs scheduled before
+a deploy still resolve). Firing does NOT auto-complete: `_fire_reminder` sets `reminded_at` +
+`next_nudge_at` (task stays `open` = "fired, awaiting the user's word") and the follow-up loop
+(`scheduler._reminder_followup_job`, quiet-hours-aware) keeps re-nudging until the user confirms.
+`mark_done` closes it (stamps `completed_at`, clears `next_nudge_at`, unschedules the job);
+`cancel_task` drops it (status `cancelled` — undoable, hidden from status/recap, pulled from the
+focus slate). The one thing shows up everywhere: status, focus, digests, recap, dashboard.
+- **Startup migration** (`migrations.py`, called from `main.lifespan` BEFORE
+  `load_pending_reminders`): every legacy `reminders` doc is copied into `tasks` keeping its
+  ObjectId (idempotency check = id already present; old inline buttons keep working). Status map:
+  pending → open; awaiting_ack / legacy fired → open with `reminded_at` (no `fired_at` → falls
+  back to fire time) so nags continue seamlessly; done/cancelled preserved (recap history
+  survives, in the Inbox project). Aware datetimes are stripped to naive UTC. The legacy
+  collection is left untouched as a backup — nothing reads it.
+- **No double-nagging**: `_fire_reminder` and each follow-up nag stamp `last_nudged_at` (arms the
+  heartbeat's 24h suppression), and `gather_candidates` skips timed tasks entirely — the exact-time
+  ping channel owns them. They're likewise excluded from focus-slate selection
+  (`_open_actionables`), the add-task slate notices, and the overbooking count: a "take out the
+  chicken at 4" errand must not eat a focus seat. The user can still swap one in via
+  `set_daily_focus`.
+- **Matching is keyword/token-based** (`_reminder_score`): a partial phrase ("gyacity images from
+  brown") matches a long title via substring + word-overlap + fuzzy ratio; `_fuzzy_tasks` uses the
+  same scorer, so closing works identically for timed and plain tasks.
+- **`cancel_task` covers everything active** — open/snoozed tasks (fired-and-nagging pings
+  included) by fuzzy match (ambiguous multi-match → be-specific list), falling back to recurring
+  reminders by text score. Cancels log `prev_state` so `/undo` restores.
 - **Dedup guards are deterministic, in the executor** (belt to the prompt's suspenders): `_add_task`
-  refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task with the SAME `parent_task_id` in the same
-  project (so the same step title under two different goals is fine); `_set_reminder` refuses a
-  near-identical reminder within 5 min of an existing active one's `fire_at` (so a deliberate
-  "at 9 and again at 5" still makes two). These stop silent duplicates even if the brain misfires.
+  refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task with the SAME `parent_task_id` in the
+  same project. With `remind_at` in play the guard gets smarter: a near-identical task WITHOUT a
+  ping gets this ping ATTACHED (`_attach_ping` — "remind me at 4 to deploy the hotfix" when that
+  task exists doesn't make a twin); one with a ping within 5 min is refused as a duplicate; pings
+  at genuinely different times ("at 9 and again at 5") coexist as two tasks.
 - **Task hierarchy: goals → steps** (`tasks.parent_task_id`, `task_tree.py`). A task with children is a
   "goal"; a task with `parent_task_id` set is a step. The tree is only ever TWO levels deep — filing under
   a step re-points to that step's goal (`_match_goal` flattens; `set_task_parent` refuses to move a task
@@ -339,35 +354,41 @@ statuses: pending → awaiting_ack → done (or cancelled).
   they differ instead of re-asking.
 - **Completion recap** (`get_recap` / `_get_recap`): "brief me on what I completed this week / the last
   2 days" → the model calls `get_recap(days)` (default 7, clamped 1–90). It lists tasks marked done in the
-  window grouped by project (steps annotated `step of "Goal"`, each with its finish day) plus reminders
-  confirmed done, and the model narrates it. `_do_close_task` now stamps `completed_at` on the task AND any
-  cascade-closed steps (naive UTC, like all task datetimes); done rows predating 2026-07-14 lack it, so the
-  recap query falls back to `updated_at` for them (`completed_at: None` matches missing too) — for a done
-  task that IS the closing moment. Reminders already had `completed_at` but store it timezone-AWARE, so the
-  recap filters those in Python (`_finished_when` normalises to naive) — a mixed-tz Mongo `$gte` would
-  misbehave under mongomock. Backward-looking only: `get_status` stays the "what's still open" view.
-- **Unified closing** — `_close_task` / `_close_reminders` are None-returning cores; `mark_done`,
-  `complete_reminder`, and `cancel_reminder` each try their own store then FALL BACK to the other, so
-  "done/cancel X" closes the thing whether it was a task or a reminder. Cross-fallback only fires when
-  the primary store has NO match (ambiguous multi-match still returns the be-specific prompt).
-- **Closing clears `next_nudge_at`** (complete/cancel + the by-id button paths) and `_fire_reminder`
-  refuses to fire a reminder whose status isn't `pending` — together these stop a closed reminder
-  from being resurrected/re-nudged (the stale-`next_nudge_at` data bug).
+  window grouped by project (steps annotated `step of "Goal"`, each with its finish day) — since the merge
+  that includes confirmed timed pings (migrated history lands under `[personal] Inbox`), and the model
+  narrates it. `_do_close_task` stamps `completed_at` on the task AND any cascade-closed steps (naive UTC,
+  like all task datetimes); done rows predating 2026-07-14 lack it, so the recap query falls back to
+  `updated_at` for them (`completed_at: None` matches missing too) — for a done task that IS the closing
+  moment. `_finished_when` still tolerates aware datetimes on migrated rows (normalises to naive; a
+  mixed-tz Mongo `$gte` would misbehave under mongomock). Backward-looking only: `get_status` stays the
+  "what's still open" view.
+- **Closing clears `next_nudge_at` + unschedules the job** (`_do_close_task`, `cancel_task`, and the
+  by-id button paths all route through `_unschedule_ping`), and `_fire_reminder` refuses to fire for a
+  task that isn't open, was deleted (/undo), or already pinged — together these stop a closed ping from
+  being resurrected/re-nudged. (Known edge: /undo of a cancelled PENDING ping restores the doc but not
+  the APScheduler job — the next restart's `load_pending_reminders` re-registers it.)
 - **One at a time, never a clump:** the follow-up loop wakes every `_FOLLOWUP_WAKE_MINUTES`
-  (15) and nudges about the SINGLE most-overdue unconfirmed reminder per wake; a backlog
-  trickles out across cycles instead of dumping 5-8 pings at once. Per-reminder `next_nudge_at`
+  (15) and nags about the SINGLE most-overdue fired-but-unconfirmed timed task per wake; a backlog
+  trickles out across cycles instead of dumping 5-8 pings at once. Per-task `next_nudge_at`
   gates when each is next due.
 - **Cadence is user-adjustable:** "space them apart / stop nagging so often" → `set_reminder_cadence`
   stores `nudge_interval_minutes` per chat in `system_state` (clamped 30–1440 by
   `clamp_followup_minutes`); `_followup_minutes(chat_id)` reads it, falling back to
   `REMINDER_FOLLOWUP_MINUTES`. Both `_fire_reminder` and the follow-up loop use it.
-- **"Remind me later" → `snooze_reminder`:** pushes `next_nudge_at` (awaiting_ack) or re-schedules
-  `fire_at` (pending) by N minutes (default 60); omit `query` to push all outstanding.
-- **Recurring reminders** (`set_recurring_reminder`): cron-style repeating pings ("every weekday
-  at 8") in the `recurring_reminders` collection, fired by `scheduler._fire_recurring` via a
-  `CronTrigger` (job id `recurring:<id>`), re-registered on startup by `load_recurring_reminders`.
-  These just ping each occurrence — NO awaiting_ack/follow-up nag. `list_reminders` shows them;
-  `cancel_reminder` matches across one-off + recurring and deactivates whichever fits best.
+- **"Remind me later" → `snooze_reminder`:** pushes `next_nudge_at` (already fired) or moves
+  `remind_at` and reschedules the job (pending) by N minutes (default 60); omit `query` to push all
+  outstanding. A pending push that crosses into a later day drags `due_date` along. Distinct from
+  `snooze` (date-based, hides a plain task from digests until then).
+- **Recurring reminders stay their own thing** (`set_recurring_reminder`): cron-style repeating
+  pings ("every weekday at 8") in the `recurring_reminders` collection, fired by
+  `scheduler._fire_recurring` via a `CronTrigger` (job id `recurring:<id>`), re-registered on
+  startup by `load_recurring_reminders`. Deliberately NOT merged into tasks — they're schedules,
+  not work items (no done state; folding them in would spawn a task per occurrence). They just
+  ping each time — no awaiting-ack/follow-up nag. `list_reminders` shows them; `cancel_task`
+  falls back to them by text match and deactivates whichever fits.
+- **Startup reload**: `load_pending_reminders(chat_id)` re-registers a job for every open,
+  not-yet-fired timed task (ones that came due while down fire immediately); fired-unconfirmed
+  ones need no job — the follow-up loop owns them.
 
 **Inline buttons (callback queries) — SENDING REMOVED, handlers kept:** as of 2026-07-11 the owner
 asked for no more buttons ("I'll just text to reply"), so NO outgoing message attaches a keyboard
@@ -378,7 +399,9 @@ history retain their keyboards forever and a tap on an old one must keep working
 `update.callback_query` → `main._handle_callback`,
 which parses compact `kind:action:id[:arg]` data (`rem:done`, `rem:snz:<id>:<min>`, `tsk:done`,
 `tsk:mute:<id>:<days>`), routes to the executor's by-id actions (`complete_reminder_by_id`,
-`snooze_reminder_by_id`, `mark_done_by_id`, `mute_task_nudge_by_id`), answers the callback (toast),
+`snooze_reminder_by_id` — since the merge these resolve the id in the TASKS collection; migrated
+reminders kept their ObjectId precisely so these old buttons still work — plus `mark_done_by_id`,
+`mute_task_nudge_by_id`), answers the callback (toast),
 and edits the message to strip the keyboard so it can't be tapped twice. `mute_task_nudge_by_id`
 pushes `last_nudged_at` forward (pauses nudges without hiding the task).
 
@@ -417,7 +440,10 @@ slate** — the fix for "four different projects pinged back-to-back". Mechanics
 - **Surfaces**: system-prompt snapshot gets a "Today's focus" section (read-only — building a
   prompt never triggers selection); morning digest leads with the slate; evening digest opens
   with the scoreboard (done/total, what carries over) + an overbooked-tomorrow heads-up (>4 due).
-- **Timed reminders are unaffected** — the fence governs only self-initiated task nudges.
+- **Timed tasks are outside the fence AND outside the slate** — a task with `remind_at`
+  pings at its exact time regardless of the slate, and is excluded from slate selection
+  (`_open_actionables`) so errand pings don't eat focus seats (swap one in explicitly via
+  `set_daily_focus` if wanted).
 - Testing note: focus's LLM patch point is `agentzero.focus.get_provider`; existing autonomy/
   digest tests stay LLM-free because their small seeds (≤3 candidates) take the deterministic path.
 

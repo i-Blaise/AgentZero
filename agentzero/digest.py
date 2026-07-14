@@ -55,14 +55,19 @@ async def _gather(chat_id: int) -> dict:
         else:
             undated.append(label)
 
+    # Scheduled pings — timed tasks (the merged "reminders"), with their exact ping times.
+    # They also appear in the dated buckets above (they're tasks with due dates); this
+    # section is the day's schedule view.
     reminders = []
-    for r in await db.reminders.find(
-        {"status": {"$in": ["pending", "awaiting_ack"]}}
-    ).sort("fire_at", 1).to_list(None):
-        fa = r["fire_at"]
-        if fa.tzinfo is None:
-            fa = fa.replace(tzinfo=timezone.utc)
-        reminders.append(f"{r['text']} — {fa.astimezone(tz).strftime('%a %d %b, %H:%M')}")
+    timed = [
+        t for t in await db.tasks.find({"status": "open"}).to_list(None)
+        if t.get("remind_at") is not None
+    ]
+    timed.sort(key=lambda t: t["remind_at"])
+    for t in timed:
+        fa = t["remind_at"].replace(tzinfo=timezone.utc)
+        tag = " (fired — awaiting confirmation)" if t.get("reminded_at") else ""
+        reminders.append(f"{t['title']} — {fa.astimezone(tz).strftime('%a %d %b, %H:%M')}{tag}")
 
     return {
         "now_local": now_local,
