@@ -518,3 +518,41 @@ async def test_timed_tasks_skip_heartbeat_and_focus_slate(mock_db):
     doc = await ensure_today_focus(CHAT_ID, allow_llm=False)
     task = await mock_db.tasks.find_one({"title": "take out the chicken"})
     assert task["_id"] not in doc["task_ids"]
+
+
+# ---------------------------------------------------------------------------
+# Identical-twin duplicates (predate the dedup guard, e.g. migrated legacy data)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_mark_done_closes_all_identical_twins(mock_db):
+    """Two copies with the SAME title: 'be more specific' would be unanswerable, so
+    closing by phrase closes every copy."""
+    for _ in range(2):
+        await _seed_timed(mock_db, "Log your time on Planorama for ID", fired=True)
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("mark_done", task_query="log your time on planorama"))
+    assert "every copy" in result.lower()
+    assert await mock_db.tasks.count_documents({"status": "done"}) == 2
+    assert await mock_db.tasks.count_documents({"status": "open"}) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_cancels_all_identical_twins(mock_db):
+    for _ in range(2):
+        await _seed_timed(mock_db, "Log your time on Planorama for ID", fired=True)
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("cancel_task", query="log your time on planorama"))
+    assert "every copy" in result.lower()
+    assert await mock_db.tasks.count_documents({"status": "cancelled"}) == 2
+
+
+@pytest.mark.asyncio
+async def test_mark_done_distinct_titles_still_ask(mock_db):
+    """DIFFERENT titles that both match stay an ambiguity prompt — only identical
+    twins auto-close together."""
+    await _seed_timed(mock_db, "Prepare for the class session for Jade", fired=True)
+    await _seed_timed(mock_db, "Prepare for the MBA class session for Jade on AI", fired=True)
+    result = await execute_tool(CHAT_ID, _tc("mark_done", task_query="class session for jade"))
+    assert "be more specific" in result.lower()
+    assert await mock_db.tasks.count_documents({"status": "done"}) == 0

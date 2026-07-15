@@ -319,6 +319,11 @@ focus slate). The one thing shows up everywhere: status, focus, digests, recap, 
 - **`cancel_task` covers everything active** — open/snoozed tasks (fired-and-nagging pings
   included) by fuzzy match (ambiguous multi-match → be-specific list), falling back to recurring
   reminders by text score. Cancels log `prev_state` so `/undo` restores.
+- **Identical twins close together** (`_close_task` / `_cancel_task`, added 2026-07-15): when
+  every match shares the SAME canonical title (duplicates predating the dedup guard — e.g.
+  migrated legacy reminders), "done/cancel X" acts on ALL copies instead of asking the user to
+  pick between indistinguishable options (an unanswerable "be more specific"). Distinct titles
+  still get the ambiguity prompt.
 - **Dedup guards are deterministic, in the executor** (belt to the prompt's suspenders): `_add_task`
   refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task with the SAME `parent_task_id` in the
   same project. With `remind_at` in play the guard gets smarter: a near-identical task WITHOUT a

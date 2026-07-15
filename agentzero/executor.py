@@ -534,13 +534,24 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
     return msg + await _focus_close_suffix(chat_id, closed_ids)
 
 
+def _canon_title(s: str) -> str:
+    return (s or "").lower().strip().rstrip(".")
+
+
 async def _close_task(chat_id: int, query: str) -> str | None:
     """Close a single matching open task. Returns a message on success or on an ambiguous
-    (>1) match; returns None when NO task matched."""
+    (>1) match; returns None when NO task matched. Multiple matches that share the SAME
+    title (identical twins, e.g. duplicates predating the dedup guard) are all closed —
+    a "be more specific" prompt between identical titles is unanswerable."""
     matches = await _fuzzy_tasks(query)
     if not matches:
         return None
     if len(matches) > 1:
+        if len({_canon_title(m["title"]) for m in matches}) == 1:
+            msg = ""
+            for m in matches:
+                msg = await _do_close_task(chat_id, m)
+            return msg + f"\n(That existed {len(matches)} times — closed every copy.)"
         listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
         return f'Found {len(matches)} tasks matching "{query}" — be more specific:\n{listed}'
     return await _do_close_task(chat_id, matches[0])
@@ -869,24 +880,29 @@ async def _cancel_task(chat_id: int, args: dict) -> str:
 
     matches = await _fuzzy_tasks(query, status=None)
     matches = [m for m in matches if m["status"] in ("open", "snoozed")]
-    if len(matches) > 1:
+    # Identical twins (same exact title) cancel together — asking the user to pick
+    # between indistinguishable options is unanswerable.
+    if len(matches) > 1 and len({_canon_title(m["title"]) for m in matches}) > 1:
         listed = "\n".join(f"  {i+1}. {m['title']}" for i, m in enumerate(matches[:5]))
         return f'Found {len(matches)} tasks matching "{query}" — be more specific:\n{listed}'
     if matches:
-        task = matches[0]
-        prev_state = dict(task)
-        await db.tasks.update_one(
-            {"_id": task["_id"]},
-            {"$set": {"status": "cancelled", "next_nudge_at": None,
-                      "updated_at": datetime.utcnow()}},
-        )
-        await _log_event(chat_id, "cancel_task", "tasks", task["_id"], prev_state)
-        _unschedule_ping(task["_id"])
-        # A cancelled task shouldn't linger in today's focus slate.
         from agentzero import focus
 
-        await focus.remove_from_focus(chat_id, task["_id"])
-        return f'Cancelled "{task["title"]}".'
+        for task in matches:
+            prev_state = dict(task)
+            await db.tasks.update_one(
+                {"_id": task["_id"]},
+                {"$set": {"status": "cancelled", "next_nudge_at": None,
+                          "updated_at": datetime.utcnow()}},
+            )
+            await _log_event(chat_id, "cancel_task", "tasks", task["_id"], prev_state)
+            _unschedule_ping(task["_id"])
+            # A cancelled task shouldn't linger in today's focus slate.
+            await focus.remove_from_focus(chat_id, task["_id"])
+        if len(matches) > 1:
+            return (f'Cancelled "{matches[0]["title"]}" — it existed {len(matches)} times, '
+                    "so every copy is gone.")
+        return f'Cancelled "{matches[0]["title"]}".'
 
     # No task matched — maybe it's a recurring reminder ("stop the 8am standup ping").
     recurring = await db.recurring_reminders.find(
