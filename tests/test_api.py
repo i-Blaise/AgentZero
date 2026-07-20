@@ -1,7 +1,7 @@
 """Dashboard API — auth gating + read-only expense JSON endpoints.
 Uses a minimal app mounting just the router (no lifespan), against mock_db."""
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import patch
@@ -19,7 +19,8 @@ def _app():
 
 
 async def _seed(mock_db):
-    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    # Relative to now — a hardcoded date rots out of the rolling "month" window.
+    now = datetime.now(timezone.utc) - timedelta(days=1)
     docs = [
         {"chat_id": CHAT_ID, "merchant": "Uber", "amount": 38.5, "currency": "GHS",
          "category": "transport", "description": "trip", "spent_at": now, "source": "yahoo", "email_id": "yahoo:1"},
@@ -108,6 +109,7 @@ async def test_timeseries_and_categories(mock_db):
                         headers={"X-API-Key": KEY}).json()
         cats = client.get("/api/expenses/categories", headers={"X-API-Key": KEY}).json()
     assert ts["bucket"] == "day"
-    assert ts["series"][0]["date"] == "2026-06-16"
+    expected_day = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert ts["series"][0]["date"] == expected_day
     assert ts["series"][0]["totals"] == {"GHS": 88.5, "USD": 10.0}
     assert "food" in cats["categories"]

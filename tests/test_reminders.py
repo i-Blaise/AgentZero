@@ -211,7 +211,7 @@ async def test_fire_reminder_uses_personality(mock_db):
 
     sent = mock_send.call_args[0][1]
     assert "take a break" in sent.lower()
-    assert sent != "⏰ Reminder: take a break"  # it went through the voice
+    assert '— task: "take a break"' in sent  # verbatim title so replies close the RIGHT task
     doc = await mock_db.tasks.find_one({"_id": tid})
     # A fired ping awaits the user's confirmation — the task stays open, nag armed.
     assert doc["status"] == "open"
@@ -233,7 +233,7 @@ async def test_fire_reminder_falls_back_on_llm_error(mock_db):
          patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
         await scheduler._fire_reminder(str(tid), CHAT_ID, "call the bank")
 
-    assert mock_send.call_args[0][1] == "⏰ Reminder: call the bank"
+    assert mock_send.call_args[0][1] == '⏰ Reminder: call the bank\n— task: "call the bank"'
     doc = await mock_db.tasks.find_one({"_id": tid})
     assert doc["reminded_at"] is not None
 
@@ -556,3 +556,70 @@ async def test_mark_done_distinct_titles_still_ask(mock_db):
     result = await execute_tool(CHAT_ID, _tc("mark_done", task_query="class session for jade"))
     assert "be more specific" in result.lower()
     assert await mock_db.tasks.count_documents({"status": "done"}) == 0
+
+
+# ---------------------------------------------------------------------------
+# Verbatim-title markers + recurring-reminder heads-up (2026-07-17 fixes)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_followup_nag_carries_verbatim_title(mock_db):
+    """Follow-up nags append the exact title so replying 'done' resolves precisely."""
+    from agentzero import scheduler
+
+    past = _naive_utc_now() - timedelta(minutes=5)
+    await _seed_timed(mock_db, "Prepare for the MBA class session for Jade", fired=True,
+                      next_nudge_at=past)
+    prov = MagicMock()
+    prov.chat = AsyncMock(return_value="⏰ That MBA class won't prep itself.")
+    with patch("agentzero.autonomy._in_quiet_hours", return_value=False), \
+         patch("agentzero.llm.get_provider", return_value=prov), \
+         patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._reminder_followup_job(CHAT_ID)
+    sent = mock_send.call_args[0][1]
+    assert '— task: "Prepare for the MBA class session for Jade"' in sent
+
+
+@pytest.mark.asyncio
+async def test_recurring_fire_carries_verbatim_marker(mock_db):
+    from agentzero import scheduler
+
+    prov = MagicMock()
+    prov.chat = AsyncMock(return_value="⏰ GHIPPS won't deploy itself.")
+    with patch("agentzero.llm.get_provider", return_value=prov), \
+         patch("agentzero.scheduler.send", new_callable=AsyncMock) as mock_send:
+        await scheduler._fire_recurring(CHAT_ID, "Deploy GHIPPS")
+    assert '— recurring reminder: "Deploy GHIPPS"' in mock_send.call_args[0][1]
+
+
+@pytest.mark.asyncio
+async def test_close_task_notes_matching_recurring_reminder(mock_db):
+    """Closing a task whose title matches an ACTIVE recurring schedule says so —
+    otherwise the schedule re-pings later and looks like the close didn't stick."""
+    await mock_db.recurring_reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "Deploy GHIPPS", "hour": 10, "minute": 0,
+         "day_of_week": "mon,tue,wed", "active": True}
+    )
+    await execute_tool(CHAT_ID, _tc("create_project", name="Work", scope="work"))
+    await execute_tool(CHAT_ID, _tc("add_task", project_name="Work", title="Deploy GHIPPS"))
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("mark_done", task_query="deploy ghipps"))
+    assert "done" in result.lower()
+    assert "recurring" in result.lower()
+    task = await mock_db.tasks.find_one({"title": "Deploy GHIPPS"})
+    assert task["status"] == "done"
+    rec = await mock_db.recurring_reminders.find_one({"text": "Deploy GHIPPS"})
+    assert rec["active"] is True  # heads-up only — never auto-cancelled
+
+
+@pytest.mark.asyncio
+async def test_close_task_no_recurring_note_when_unrelated(mock_db):
+    await mock_db.recurring_reminders.insert_one(
+        {"chat_id": CHAT_ID, "text": "Practice DSA on LeetCode", "hour": 9, "minute": 0,
+         "day_of_week": "mon-fri", "active": True}
+    )
+    await execute_tool(CHAT_ID, _tc("create_project", name="Work", scope="work"))
+    await execute_tool(CHAT_ID, _tc("add_task", project_name="Work", title="Send the invoice"))
+    with patch("agentzero.scheduler.get_scheduler"):
+        result = await execute_tool(CHAT_ID, _tc("mark_done", task_query="send the invoice"))
+    assert "recurring" not in result.lower()

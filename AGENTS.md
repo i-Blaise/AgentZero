@@ -323,7 +323,21 @@ focus slate). The one thing shows up everywhere: status, focus, digests, recap, 
   every match shares the SAME canonical title (duplicates predating the dedup guard — e.g.
   migrated legacy reminders), "done/cancel X" acts on ALL copies instead of asking the user to
   pick between indistinguishable options (an unanswerable "be more specific"). Distinct titles
-  still get the ambiguity prompt.
+  still get the ambiguity prompt. Do NOT widen this to a similarity threshold: measured on real
+  data, genuinely-distinct tasks ("Integrate TikTok…" vs "Integrate other social medias…") score
+  0.725 while true near-dupe pairs score 0.697 — no safe cutoff exists.
+- **Pings carry the VERBATIM title** (2026-07-17): every fire/nag message ends with
+  `— task: "<exact title>"` (recurring: `— recurring reminder: "<text>"`). The witty LLM line is
+  a paraphrase, so replying "done" to it used to let the brain derive a lossy query that closed
+  the wrong near-duplicate sibling (confirmed in prod: the nudged item hit 22 nags while its
+  0.85-similar sibling got closed). A prompt rule tells the model to use the quoted marker line
+  character-for-character as the close query. A second prompt rule forbids EVER claiming a
+  close succeeded without a tool confirmation in the same turn (prod showed the brain twice
+  claiming "marked as done" with no mark_done event written at all).
+- **Closing a task that matches an active recurring reminder appends a heads-up**
+  (`_recurring_note`, 2026-07-17): recurring schedules fire independently of task closes
+  (prod: "Deploy GHIPPS" task closed Jul 13, recurring mon-wed 10:00 kept pinging). The note
+  names the schedule and offers to cancel it — informational only, never auto-deactivates.
 - **Dedup guards are deterministic, in the executor** (belt to the prompt's suspenders): `_add_task`
   refuses a near-identical (`_sim ≥ 0.85`) open/snoozed task with the SAME `parent_task_id` in the
   same project. With `remind_at` in play the guard gets smarter: a near-identical task WITHOUT a

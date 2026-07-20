@@ -119,7 +119,10 @@ async def _fire_reminder(task_id: str, chat_id: int, text: str) -> None:
             return
         now = datetime.utcnow()
         gap = await _followup_minutes(chat_id)
-        await send(chat_id, await _phrase_reminder(text))
+        # The witty LLM line is a paraphrase — append the VERBATIM title so a reply to
+        # this message carries the exact string and "done" closes the right task, not a
+        # near-duplicate sibling (the wrong-doc close bug, 2026-07-17).
+        await send(chat_id, f'{await _phrase_reminder(text)}\n— task: "{text}"')
         # last_nudged_at too, so the autonomy heartbeat's 24h suppression won't pile a
         # second opportunistic nudge on top of the ping.
         await db.tasks.update_one(
@@ -167,12 +170,10 @@ async def _reminder_followup_job(chat_id: int) -> None:
     due.sort(key=lambda x: x[1])
     t = due[0][0]
     try:
-        await send(
-            chat_id,
-            await _phrase_reminder(
-                f"{t['title']} (still not marked done — tell me when it's handled)"
-            ),
+        phrased = await _phrase_reminder(
+            f"{t['title']} (still not marked done — tell me when it's handled)"
         )
+        await send(chat_id, f'{phrased}\n— task: "{t["title"]}"')
     except Exception:
         logger.exception("Follow-up nudge failed for reminder %s", t["_id"])
         return
@@ -221,7 +222,9 @@ def schedule_reminder(
 async def _fire_recurring(chat_id: int, text: str) -> None:
     """Fire a recurring reminder — just pings (it'll come round again), no follow-up nag."""
     try:
-        await send(chat_id, await _phrase_reminder(text))
+        # Verbatim marker so "stop reminding me about this" resolves against the schedule,
+        # not a similarly-named task.
+        await send(chat_id, f'{await _phrase_reminder(text)}\n— recurring reminder: "{text}"')
     except Exception:
         logger.exception("Failed to fire recurring reminder for chat %s", chat_id)
 

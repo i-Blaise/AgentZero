@@ -483,6 +483,25 @@ async def _focus_close_suffix(chat_id: int, closed_ids: list) -> str:
     return base + " Nothing else is pressing — enjoy the headroom."
 
 
+async def _recurring_note(chat_id: int, title: str) -> str:
+    """If a just-closed task's title matches an ACTIVE recurring reminder, say so —
+    the schedule fires independently, and silently letting it re-ping the user about a
+    thing they just closed reads as "the bot didn't really close it"."""
+    db = get_db()
+    rows = await db.recurring_reminders.find(
+        {"chat_id": chat_id, "active": True}
+    ).to_list(None)
+    hits = [r for r in rows if _reminder_score(title, r["text"]) >= 0.5]
+    if not hits:
+        return ""
+    r = hits[0]
+    sched = (f"{_humanise_dow(r.get('day_of_week', '*'))} at "
+             f"{r['hour']:02d}:{r.get('minute', 0):02d}")
+    return (f'\nHeads-up: "{r["text"]}" is also a RECURRING reminder ({sched}) — that fires '
+            "on its own schedule regardless of this task. Say the word and I'll cancel the "
+            "recurring one too.")
+
+
 async def _do_close_task(chat_id: int, task: dict) -> str:
     """Mark one task done, then handle the hierarchy:
       - closing a GOAL cascade-closes its still-open steps (with notice);
@@ -519,7 +538,8 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
             closed_ids.append(s["_id"])
         n = len(open_steps)
         msg = f'Done: "{task["title"]}" — and closed its {n} open step{"" if n == 1 else "s"} too.'
-        return msg + await _focus_close_suffix(chat_id, closed_ids)
+        return (msg + await _focus_close_suffix(chat_id, closed_ids)
+            + await _recurring_note(chat_id, task["title"]))
 
     # This task is a STEP → progress / last-step nudge.
     msg = f'Done: "{task["title"]}".'
@@ -531,7 +551,8 @@ async def _do_close_task(chat_id: int, task: dict) -> str:
                    f'"{parent["title"]}" — want me to mark the whole goal done?')
         elif parent:
             msg = f'Done: "{task["title"]}" ({parent["title"]}: {done}/{total} steps).'
-    return msg + await _focus_close_suffix(chat_id, closed_ids)
+    return (msg + await _focus_close_suffix(chat_id, closed_ids)
+            + await _recurring_note(chat_id, task["title"]))
 
 
 def _canon_title(s: str) -> str:
@@ -899,10 +920,11 @@ async def _cancel_task(chat_id: int, args: dict) -> str:
             _unschedule_ping(task["_id"])
             # A cancelled task shouldn't linger in today's focus slate.
             await focus.remove_from_focus(chat_id, task["_id"])
+        note = await _recurring_note(chat_id, matches[0]["title"])
         if len(matches) > 1:
             return (f'Cancelled "{matches[0]["title"]}" — it existed {len(matches)} times, '
-                    "so every copy is gone.")
-        return f'Cancelled "{matches[0]["title"]}".'
+                    f"so every copy is gone.{note}")
+        return f'Cancelled "{matches[0]["title"]}".{note}'
 
     # No task matched — maybe it's a recurring reminder ("stop the 8am standup ping").
     recurring = await db.recurring_reminders.find(
